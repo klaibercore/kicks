@@ -1,242 +1,21 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
 import { Slider } from "@/components/ui/slider";
-
-const API = "/api";
-
-const SLIDER_COLORS = [
-  { accent: "#a78bfa", glow: "rgba(167,139,250,0.35)" },
-  { accent: "#f472b6", glow: "rgba(244,114,182,0.35)" },
-  { accent: "#34d399", glow: "rgba(52,211,153,0.35)" },
-  { accent: "#fbbf24", glow: "rgba(251,191,36,0.35)" },
-];
-
-interface SliderConfig {
-  id: number;
-  name: string;
-  min: number;
-  max: number;
-  default: number;
-  step: number;
-}
-
-/* ── Animated waveform background ── */
-function WaveBackground() {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const animRef = useRef<number>(0);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d")!;
-    let w = 0,
-      h = 0;
-
-    function resize() {
-      w = canvas!.width = window.innerWidth;
-      h = canvas!.height = window.innerHeight;
-    }
-    resize();
-    window.addEventListener("resize", resize);
-
-    function draw(t: number) {
-      ctx.clearRect(0, 0, w, h);
-
-      const waves = [
-        { color: "rgba(167,139,250,0.07)", speed: 0.0003, amp: 80, freq: 0.003, yOff: 0.35 },
-        { color: "rgba(244,114,182,0.05)", speed: 0.0005, amp: 60, freq: 0.004, yOff: 0.45 },
-        { color: "rgba(52,211,153,0.04)", speed: 0.0004, amp: 50, freq: 0.005, yOff: 0.55 },
-        { color: "rgba(251,191,36,0.03)", speed: 0.0006, amp: 40, freq: 0.006, yOff: 0.65 },
-      ];
-
-      for (const wave of waves) {
-        ctx.beginPath();
-        ctx.moveTo(0, h);
-        for (let x = 0; x <= w; x += 3) {
-          const y =
-            h * wave.yOff +
-            Math.sin(x * wave.freq + t * wave.speed) * wave.amp +
-            Math.sin(x * wave.freq * 0.5 + t * wave.speed * 1.3) * wave.amp * 0.5;
-          ctx.lineTo(x, y);
-        }
-        ctx.lineTo(w, h);
-        ctx.closePath();
-        ctx.fillStyle = wave.color;
-        ctx.fill();
-      }
-
-      // Subtle radial glow at center
-      const grd = ctx.createRadialGradient(w / 2, h * 0.38, 0, w / 2, h * 0.38, w * 0.5);
-      grd.addColorStop(0, "rgba(167,139,250,0.06)");
-      grd.addColorStop(0.5, "rgba(244,114,182,0.02)");
-      grd.addColorStop(1, "transparent");
-      ctx.fillStyle = grd;
-      ctx.fillRect(0, 0, w, h);
-
-      animRef.current = requestAnimationFrame(draw);
-    }
-
-    animRef.current = requestAnimationFrame(draw);
-    return () => {
-      cancelAnimationFrame(animRef.current);
-      window.removeEventListener("resize", resize);
-    };
-  }, []);
-
-  return (
-    <canvas
-      ref={canvasRef}
-      className="fixed inset-0 pointer-events-none"
-      style={{ zIndex: 0 }}
-    />
-  );
-}
-
-/* ── Mini waveform visualiser ── */
-function WaveformVis({ audioRef }: { audioRef: React.RefObject<HTMLAudioElement | null> }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const ctxRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
-  const animRef = useRef<number>(0);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const audio = audioRef.current;
-    if (!canvas || !audio) return;
-
-    function initAudio() {
-      if (ctxRef.current) return;
-      const actx = new AudioContext();
-      const analyser = actx.createAnalyser();
-      analyser.fftSize = 256;
-      const source = actx.createMediaElementSource(audio!);
-      source.connect(analyser);
-      analyser.connect(actx.destination);
-      ctxRef.current = actx;
-      analyserRef.current = analyser;
-      sourceRef.current = source;
-    }
-
-    function draw() {
-      const ctx = canvas!.getContext("2d")!;
-      const w = canvas!.width;
-      const h = canvas!.height;
-      ctx.clearRect(0, 0, w, h);
-
-      if (analyserRef.current) {
-        const bufLen = analyserRef.current.frequencyBinCount;
-        const data = new Uint8Array(bufLen);
-        analyserRef.current.getByteFrequencyData(data);
-
-        const barW = w / bufLen;
-        for (let i = 0; i < bufLen; i++) {
-          const v = data[i] / 255;
-          const barH = v * h * 0.9;
-
-          const gradient = ctx.createLinearGradient(0, h, 0, h - barH);
-          gradient.addColorStop(0, "rgba(167,139,250,0.8)");
-          gradient.addColorStop(0.5, "rgba(244,114,182,0.6)");
-          gradient.addColorStop(1, "rgba(52,211,153,0.4)");
-          ctx.fillStyle = gradient;
-
-          const x = i * barW;
-          ctx.beginPath();
-          ctx.roundRect(x + 0.5, h - barH, Math.max(barW - 1, 1), barH, 2);
-          ctx.fill();
-        }
-      } else {
-        // Idle state: draw a subtle sine wave
-        const t = Date.now() * 0.002;
-        ctx.beginPath();
-        ctx.strokeStyle = "rgba(167,139,250,0.2)";
-        ctx.lineWidth = 1.5;
-        for (let x = 0; x < w; x++) {
-          const y = h / 2 + Math.sin(x * 0.04 + t) * 8 + Math.sin(x * 0.02 + t * 0.7) * 5;
-          x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-        }
-        ctx.stroke();
-      }
-
-      animRef.current = requestAnimationFrame(draw);
-    }
-
-    audio.addEventListener("play", initAudio);
-    animRef.current = requestAnimationFrame(draw);
-
-    return () => {
-      audio.removeEventListener("play", initAudio);
-      cancelAnimationFrame(animRef.current);
-    };
-  }, [audioRef]);
-
-  return (
-    <canvas
-      ref={canvasRef}
-      width={480}
-      height={80}
-      className="w-full rounded-xl"
-      style={{ height: 80 }}
-    />
-  );
-}
+import { SLIDER_COLORS } from "@/types/synth";
+import { WaveBackground } from "@/components/synth/wave-background";
+import { WaveformVis } from "@/components/synth/waveform-vis";
+import { useSynth } from "@/hooks/use-synth";
 
 export default function Home() {
-  const [sliders, setSliders] = useState<SliderConfig[]>([]);
-  const [values, setValues] = useState<number[]>([]);
-  const [status, setStatus] = useState("Loading...");
-  const playerRef = useRef<HTMLAudioElement>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const blobUrlRef = useRef<string | null>(null);
-  const initialGenDone = useRef(false);
-
-  useEffect(() => {
-    fetch(`${API}/config`)
-      .then((r) => r.json())
-      .then((data) => {
-        setSliders(data.sliders);
-        setValues(data.sliders.map((s: SliderConfig) => s.default));
-        setStatus("");
-      })
-      .catch(() => setStatus("Cannot connect to backend"));
-  }, []);
-
-  const generate = useCallback((vals: number[]) => {
-    if (vals.length === 0) return;
-    setStatus("Generating...");
-    const params = vals.map((v, i) => `pc${i + 1}=${v}`).join("&");
-    fetch(`${API}/generate?${params}`)
-      .then((r) => r.blob())
-      .then((blob) => {
-        if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
-        const url = URL.createObjectURL(blob);
-        blobUrlRef.current = url;
-        const player = playerRef.current;
-        if (player) {
-          player.src = url;
-          player.play().catch(() => {});
-        }
-        setStatus("");
-      })
-      .catch(() => setStatus("Error generating"));
-  }, []);
-
-  useEffect(() => {
-    if (values.length > 0 && !initialGenDone.current) {
-      initialGenDone.current = true;
-      generate(values);
-    }
-  }, [values, generate]);
-
-  const handleSliderChange = (index: number, newValue: number[]) => {
-    const updated = [...values];
-    updated[index] = newValue[0];
-    setValues(updated);
-
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => generate(updated), 150);
-  };
+  const {
+    sliders,
+    values,
+    status,
+    playerRef,
+    handleSliderChange,
+    randomize,
+    download,
+  } = useSynth();
 
   return (
     <>
@@ -299,28 +78,13 @@ export default function Home() {
             {/* Action Buttons */}
             <div className="flex gap-3">
               <button
-                onClick={() => {
-                  if (!sliders.length) return;
-                  const randomized = sliders.map(() => Math.random());
-                  setValues(randomized);
-                  if (debounceRef.current) clearTimeout(debounceRef.current);
-                  debounceRef.current = setTimeout(
-                    () => generate(randomized),
-                    150
-                  );
-                }}
+                onClick={randomize}
                 className="flex-1 py-2.5 rounded-xl border border-violet-500/30 bg-violet-500/10 text-sm font-semibold tracking-wide uppercase text-violet-300 hover:bg-violet-500/20 hover:border-violet-500/50 transition-all duration-200"
               >
                 Randomise
               </button>
               <button
-                onClick={() => {
-                  if (!blobUrlRef.current) return;
-                  const a = document.createElement("a");
-                  a.href = blobUrlRef.current;
-                  a.download = "kick.wav";
-                  a.click();
-                }}
+                onClick={download}
                 className="flex-1 py-2.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-sm font-semibold tracking-wide uppercase text-emerald-300 hover:bg-emerald-500/20 hover:border-emerald-500/50 transition-all duration-200"
               >
                 Download WAV

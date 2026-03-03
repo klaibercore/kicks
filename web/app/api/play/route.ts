@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 
-const PROJECT_ROOT = "/Users/kevinpaulklaiber/Development/kicks";
+const PROJECT_ROOT = path.resolve(process.cwd(), "..");
 
 export async function GET(request: Request) {
   try {

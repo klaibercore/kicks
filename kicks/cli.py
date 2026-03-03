@@ -1,0 +1,97 @@
+"""Kicks CLI -- train, serve, and analyze kick drum models."""
+
+import typer
+
+app = typer.Typer(
+    name="kicks",
+    help="VAE-powered kick drum synthesizer.",
+    no_args_is_help=True,
+)
+
+
+@app.command()
+def train(
+    data: str = typer.Option("data/kicks", "--data", "-d", help="Path to training data directory"),
+    epochs: int = typer.Option(200, "--epochs", "-e", help="Number of training epochs"),
+    latent_dim: int = typer.Option(32, "--latent-dim", help="VAE latent dimension"),
+    beta: float = typer.Option(1.0, "--beta", help="KL beta weight"),
+) -> None:
+    """Train the kick drum VAE."""
+    import os
+
+    import torch
+    import torchaudio
+    from torch import optim
+
+    from kicks import KickDataset, KickDataloader, VAE
+    from kicks.config import get_device
+    from kicks.model import SAMPLE_RATE
+    from kicks.train import train as train_loop
+    from kicks.vocoder import load_vocoder, spec_to_audio
+
+    os.makedirs("models", exist_ok=True)
+    os.makedirs("output", exist_ok=True)
+
+    dataset = KickDataset(data)
+    dataloader = KickDataloader(dataset, batch_size=32, shuffle=True)
+    print(f"Dataset: {len(dataset)} samples from {data}")
+
+    device = get_device()
+    model = VAE(latent_dim=latent_dim)
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+
+    param_count = sum(p.numel() for p in model.parameters())
+    print(f"Model: {param_count:,} parameters, latent_dim={latent_dim}, device={device}")
+
+    train_loop(
+        model, dataloader, optimizer,
+        epochs=epochs, device=device,
+        beta=beta, beta_anneal_epochs=epochs, beta_cycles=4,
+    )
+
+    vocoder = load_vocoder(device)
+
+    with torch.no_grad():
+        model.eval()
+
+        for i in range(min(20, len(dataset))):
+            original = dataset[i].unsqueeze(0).to(device)
+            recon, _, _ = model(original)
+            audio = spec_to_audio(recon, dataset, vocoder, device)
+            torchaudio.save(f"output/recon_{i + 1}.wav", audio, SAMPLE_RATE)
+            print(f"Saved output/recon_{i + 1}.wav")
+
+        for i in range(10):
+            z = torch.randn(1, latent_dim).to(device)
+            spec = model.decode(z)
+            audio = spec_to_audio(spec, dataset, vocoder, device)
+            torchaudio.save(f"output/gen_{i + 1}.wav", audio, SAMPLE_RATE)
+            print(f"Saved output/gen_{i + 1}.wav")
+
+    print("Done!")
+
+
+@app.command()
+def serve(
+    data: str = typer.Option("data/kicks", "--data", "-d", help="Path to dataset directory"),
+    port: int = typer.Option(8080, "--port", "-p", help="API port"),
+    host: str = typer.Option("0.0.0.0", "--host", help="API host"),
+) -> None:
+    """Start the FastAPI synthesis server."""
+    import os
+
+    import uvicorn
+
+    os.environ.setdefault("KICKS_DATA_DIR", data)
+    uvicorn.run("kicks.server:app", host=host, port=port, reload=False)
+
+
+@app.command()
+def cluster(
+    data: str = typer.Option("data/kicks", "--data", "-d", help="Path to dataset directory"),
+    samples: int = typer.Option(0, "--samples", "-n", help="Number of samples to cluster (0 = all)"),
+) -> None:
+    """Run GMM clustering and PCA analysis on the latent space."""
+    from kicks._cluster_cmd import run_cluster
+
+    run_cluster(data=data, n_samples=samples if samples > 0 else None)

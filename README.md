@@ -24,12 +24,19 @@ Kick samples (.wav)
 
 - Python 3.10+
 - Node.js 18+
+- [uv](https://docs.astral.sh/uv/) (recommended) or pip
 - Apple Silicon (MPS), CUDA GPU, or CPU
 
 ### Install Python dependencies
 
 ```bash
-pip install torch torchaudio rich matplotlib scikit-learn flask flask-cors bigvgan pyloudnorm
+uv sync
+```
+
+Or with pip:
+
+```bash
+pip install -e .
 ```
 
 ### Install frontend dependencies
@@ -47,18 +54,27 @@ Place `.wav` kick drum samples in `data/kicks/`.
 ### 1. Train
 
 ```bash
-python main.py
+uv run kicks train
 ```
 
 Trains for 200 epochs with cyclical beta annealing (4 cycles, beta ramping 0 -> 1.0 per cycle). Monitors reconstruction loss (spectral convergence + L1) and KL divergence separately. Saves `models/best.pth` (best validation loss) and `models/checkpoint.pth` (final). Generates 20 reconstructions and 10 latent samples in `output/`.
+
+Options:
+
+```
+--data, -d    Path to training data (default: data/kicks)
+--epochs, -e  Number of epochs (default: 200)
+--latent-dim  Latent dimension (default: 32)
+--beta        KL beta weight (default: 1.0)
+```
 
 ### 2. Run the web synth
 
 Start the backend and frontend in two terminals:
 
 ```bash
-# Terminal 1 -- API backend
-python app.py
+# Terminal 1 -- FastAPI backend
+uv run kicks serve
 ```
 
 ```bash
@@ -68,14 +84,23 @@ cd web && npm run dev
 
 Open [http://localhost:3000](http://localhost:3000). Move the sliders to generate kick drums in real-time. Use **Randomise** to explore the latent space and **Download WAV** to save kicks.
 
+API docs available at [http://localhost:8080/docs](http://localhost:8080/docs).
+
 ### 3. Cluster + visualize
 
 ```bash
-python cluster.py
+uv run kicks cluster
 cd web && npm run dev
 ```
 
 Runs GMM clustering with BIC-selected k, PCA to 3 components, and saves analysis to `output/cluster_analysis.json`. Open [http://localhost:3000/cluster](http://localhost:3000/cluster) to view the 3D PCA visualization.
+
+Options:
+
+```
+--data, -d     Path to dataset (default: data/kicks)
+--samples, -n  Number of samples to cluster (default: all)
+```
 
 ## Model
 
@@ -86,7 +111,7 @@ Runs GMM clustering with BIC-selected k, PCA to 3 components, and saves analysis
 | Input | Log-mel spectrogram (1, 128, 256) |
 | Sample rate | 44100 Hz |
 | Audio length | ~1.49s (65536 samples) |
-| N_FFT | 2048 |
+| N_FFT | 1024 |
 | HOP_LENGTH | 256 |
 | N_MELS | 128 |
 | Latent dim | 32 |
@@ -103,24 +128,36 @@ Runs GMM clustering with BIC-selected k, PCA to 3 components, and saves analysis
 
 ```
 kicks/
-├── app.py                  # API backend (Flask, port 8080)
-├── main.py                 # Train + generate audio samples
-├── cluster.py              # GMM clustering + TensorBoard
-├── kicks/                  # Core Python package
-│   ├── model.py            # 2D Conv VAE + audio constants
-│   ├── dataset.py          # Load audio -> LUFS norm -> log-mel -> fixed dB norm
-│   ├── dataloader.py       # DataLoader wrapper
-│   ├── train.py            # Training loop with cyclical beta annealing
-│   ├── loss.py             # Spectral convergence + L1 + beta * KL
-│   ├── vocoder.py          # BigVGAN vocoder (spec -> audio)
-│   └── cluster.py          # GMM, PCA, descriptors, TensorBoard
-├── web/                    # Next.js + shadcn/ui frontend
-│   ├── app/page.tsx        # Main page with sliders, randomise, download
-│   └── components/ui/      # shadcn components (Slider, Card)
-├── data/kicks/             # Input .wav samples (not tracked)
-├── models/                 # Saved checkpoints (not tracked)
-├── output/                 # Generated audio (not tracked)
-└── runs/                   # TensorBoard logs (not tracked)
+├── pyproject.toml               # Python project config (uv/pip)
+├── main.py                      # Legacy shim -> kicks train
+├── app.py                       # Legacy shim -> kicks serve
+├── cluster.py                   # Legacy shim -> kicks cluster
+├── kicks/                       # Core Python package
+│   ├── cli.py                   # Typer CLI (train, serve, cluster)
+│   ├── server.py                # FastAPI backend (replaces Flask)
+│   ├── config.py                # Centralized config & device detection
+│   ├── model.py                 # 2D Conv VAE + audio constants
+│   ├── dataset.py               # Load audio -> LUFS norm -> log-mel -> fixed dB norm
+│   ├── dataloader.py            # DataLoader wrapper
+│   ├── train.py                 # Training loop with cyclical beta annealing
+│   ├── loss.py                  # Spectral convergence + L1 + beta * KL
+│   ├── vocoder.py               # BigVGAN vocoder (spec -> audio)
+│   ├── cluster.py               # GMM, PCA, descriptors
+│   └── _cluster_cmd.py          # Cluster command implementation
+├── web/                         # Next.js + shadcn/ui frontend
+│   ├── app/
+│   │   ├── page.tsx             # Synthesizer page
+│   │   └── cluster/page.tsx     # PCA analysis page
+│   ├── components/
+│   │   ├── synth/               # Synthesizer components
+│   │   ├── cluster/             # Cluster analysis components
+│   │   └── ui/                  # shadcn components
+│   ├── hooks/                   # Custom React hooks
+│   ├── types/                   # TypeScript type definitions
+│   └── lib/                     # Shared utilities
+├── data/kicks/                  # Input .wav samples (not tracked)
+├── models/                      # Saved checkpoints (not tracked)
+└── output/                      # Generated audio (not tracked)
 ```
 
 ## License
