@@ -12,6 +12,27 @@ BIGVGAN_MODEL = "nvidia/bigvgan_v2_44khz_128band_256x"
 FINETUNED_PATH = "models/vocoder/best.pth"
 
 
+def _patch_bigvgan_from_pretrained():
+    """Patch BigVGAN._from_pretrained to work with huggingface_hub >= 1.0.
+
+    Newer huggingface_hub versions removed the `proxies` and `resume_download`
+    kwargs from the call to `_from_pretrained`, but bigvgan still declares them
+    as required keyword-only arguments.
+    """
+    original = bigvgan.BigVGAN._from_pretrained.__func__
+
+    @classmethod  # type: ignore[misc]
+    def _patched(cls, **kwargs):
+        kwargs.setdefault("proxies", None)
+        kwargs.setdefault("resume_download", False)
+        return original(cls, **kwargs)
+
+    bigvgan.BigVGAN._from_pretrained = _patched
+
+
+_patch_bigvgan_from_pretrained()
+
+
 def load_vocoder(device: torch.device) -> bigvgan.BigVGAN:
     """Load BigVGAN vocoder. Uses fine-tuned weights if available, otherwise pretrained."""
     model = bigvgan.BigVGAN.from_pretrained(BIGVGAN_MODEL, use_cuda_kernel=False)
@@ -44,8 +65,14 @@ def spec_to_audio(
     Returns:
         Waveform tensor, shape (B, T).
     """
-    from .dataset import KickDataset
+    from .dataset import KickDataset, LOG_MEL_MIN
     log_mel = KickDataset.denormalize(spec_normalized.cpu())
+    # Gate near-silence frames to the true silence floor.
+    # The VAE's sigmoid output can't reach exact zero, so values meant to be
+    # silent end up slightly above LOG_MEL_MIN. BigVGAN faithfully synthesizes
+    # these as high-frequency artifacts. Snap them to the floor.
+    silence_threshold = LOG_MEL_MIN + 2.0  # ~2 nats above silence floor
+    log_mel = torch.where(log_mel < silence_threshold, LOG_MEL_MIN, log_mel)
     log_mel = log_mel.squeeze(1)  # (B, 128, 256)
     with torch.no_grad():
         waveform = vocoder(log_mel.to(device))  # (B, 1, T)

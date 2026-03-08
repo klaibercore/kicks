@@ -5,10 +5,12 @@ what the vocoder was trained on (n_fft=1024, magnitude spectrum, ln clamp).
 """
 
 import os
+import warnings
 
 import numpy as np
 import pyloudnorm as pyln
 import torch
+import soundfile as sf
 import torchaudio
 from bigvgan import mel_spectrogram as bigvgan_mel_spectrogram
 from torch.utils.data import Dataset
@@ -45,7 +47,12 @@ class KickDataset(Dataset):
             if not file.endswith(".wav"):
                 continue
             path = os.path.join(dir, file)
-            audio, sr = torchaudio.load(path)  # type: ignore
+            data, sr = sf.read(path, dtype="float32")
+            # sf.read returns (samples,) for mono or (samples, channels) for stereo
+            if data.ndim == 1:
+                audio = torch.from_numpy(data).unsqueeze(0)  # (1, samples)
+            else:
+                audio = torch.from_numpy(data.T)  # (channels, samples)
 
             # Convert to mono
             if audio.shape[0] > 1:
@@ -67,7 +74,9 @@ class KickDataset(Dataset):
             audio_np = audio.squeeze(0).numpy()
             loudness = self._lufs_meter.integrated_loudness(audio_np)
             if np.isfinite(loudness):
-                audio_np = pyln.normalize.loudness(audio_np, loudness, TARGET_LUFS)
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message="Possible clipped samples", module="pyloudnorm")
+                    audio_np = pyln.normalize.loudness(audio_np, loudness, TARGET_LUFS)
                 audio_np = np.clip(audio_np, -1.0, 1.0)
                 audio = torch.from_numpy(audio_np).unsqueeze(0).float()
 
@@ -91,6 +100,8 @@ class KickDataset(Dataset):
             self.tensors.append(normalized)
             self.paths.append(path)
 
+        if not self.tensors:
+            raise RuntimeError(f"No .wav files found in {dir}")
         print(f"Loaded {len(self.tensors)} samples, spectrogram shape: {self.tensors[0].shape}")
 
     def __len__(self) -> int:

@@ -19,8 +19,8 @@ def train(
     """Train the kick drum VAE."""
     import os
 
+    import soundfile as sf
     import torch
-    import torchaudio
     from torch import optim
 
     from kicks import KickDataset, KickDataloader, VAE
@@ -58,14 +58,14 @@ def train(
             original = dataset[i].unsqueeze(0).to(device)
             recon, _, _ = model(original)
             audio = spec_to_audio(recon, dataset, vocoder, device)
-            torchaudio.save(f"output/recon_{i + 1}.wav", audio, SAMPLE_RATE)
+            sf.write(f"output/recon_{i + 1}.wav", audio.squeeze(0).numpy(), SAMPLE_RATE)
             print(f"Saved output/recon_{i + 1}.wav")
 
         for i in range(10):
             z = torch.randn(1, latent_dim).to(device)
             spec = model.decode(z)
             audio = spec_to_audio(spec, dataset, vocoder, device)
-            torchaudio.save(f"output/gen_{i + 1}.wav", audio, SAMPLE_RATE)
+            sf.write(f"output/gen_{i + 1}.wav", audio.squeeze(0).numpy(), SAMPLE_RATE)
             print(f"Saved output/gen_{i + 1}.wav")
 
     print("Done!")
@@ -84,6 +84,16 @@ def serve(
 
     os.environ.setdefault("KICKS_DATA_DIR", data)
     uvicorn.run("kicks.server:app", host=host, port=port, reload=False)
+
+
+@app.command()
+def tui(
+    data: str = typer.Option("data/kicks", "--data", "-d", help="Path to dataset directory"),
+) -> None:
+    """Launch the interactive TUI synthesizer."""
+    from kicks.tui import run_tui
+
+    run_tui(data_dir=data)
 
 
 @app.command()

@@ -9,7 +9,7 @@ import torch
 DATA_DIR = os.environ.get("KICKS_DATA_DIR", "data/kicks")
 MODEL_DIR = os.environ.get("KICKS_MODEL_DIR", "models")
 OUTPUT_DIR = os.environ.get("KICKS_OUTPUT_DIR", "output")
-BEST_CHECKPOINT = os.path.join(MODEL_DIR, "best.pth")
+BEST_CHECKPOINT = os.path.join(MODEL_DIR, "vae_best.pth")
 
 # Model defaults
 LATENT_DIM = 32

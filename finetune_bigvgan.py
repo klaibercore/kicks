@@ -24,6 +24,7 @@ import glob
 import itertools
 
 import torch
+import soundfile as sf
 import torchaudio
 from torch.utils.data import Dataset, DataLoader
 from torch.cuda.amp import GradScaler, autocast
@@ -52,7 +53,11 @@ class KickAudioDataset(Dataset):
         for file in sorted(os.listdir(dir)):
             if not file.endswith('.wav'):
                 continue
-            audio, sr = torchaudio.load(os.path.join(dir, file))
+            data, sr = sf.read(os.path.join(dir, file), dtype="float32")
+            if data.ndim == 1:
+                audio = torch.from_numpy(data).unsqueeze(0)
+            else:
+                audio = torch.from_numpy(data.T)
             if audio.shape[0] > 1:
                 audio = torch.mean(audio, dim=0, keepdim=True)
             if sr != SAMPLE_RATE:

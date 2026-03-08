@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 
 import numpy as np
 import torch
-import torchaudio
+import soundfile as sf
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -157,7 +157,7 @@ async def generate(
         waveform = spec_to_audio(spec, _state.dataset, _state.vocoder, _state.device)
 
     buf = io.BytesIO()
-    torchaudio.save(buf, waveform, SAMPLE_RATE, format="wav")
+    sf.write(buf, waveform.squeeze(0).numpy(), SAMPLE_RATE, format="WAV")
     buf.seek(0)
 
     return StreamingResponse(buf, media_type="audio/wav")

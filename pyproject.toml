@@ -8,6 +8,7 @@ requires-python = ">=3.10"
 dependencies = [
     "torch>=2.6.0",
     "torchaudio>=2.6.0",
+    "soundfile>=0.12",
     "numpy",
     "scikit-learn",
     "matplotlib",
@@ -17,6 +18,7 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.34.0",
     "typer>=0.15.0",
+    "textual>=8.0.2",
 ]
 
 [project.optional-dependencies]

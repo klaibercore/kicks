@@ -102,14 +102,14 @@ def train(
                     "model": model.state_dict(),
                     "epoch": epoch + 1,
                     "val_loss": val_loss,
-                }, save_dir + "best.pth")
+                }, save_dir + "vae_best.pth")
 
     # Save final checkpoint
     torch.save({
         "model": model.state_dict(),
         "epoch": epochs,
         "loss_history": epoch_loss,
-    }, save_dir + "checkpoint.pth")
+    }, save_dir + "vae_checkpoint.pth")
 
     # Plot loss components
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4))

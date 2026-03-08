@@ -68,7 +68,17 @@ Options:
 --beta        KL beta weight (default: 1.0)
 ```
 
-### 2. Run the web synth
+### 2. Synthesize kicks
+
+#### Terminal UI (no browser needed)
+
+```bash
+uv run kicks tui
+```
+
+A full synthesizer in your terminal. Use **Tab** to switch between sliders, **Left/Right** to adjust, **Space** to generate & play, **S** to save, and **R** to randomize.
+
+#### Web UI
 
 Start the backend and frontend in two terminals:
 
@@ -133,8 +143,9 @@ kicks/
 ├── app.py                       # Legacy shim -> kicks serve
 ├── cluster.py                   # Legacy shim -> kicks cluster
 ├── kicks/                       # Core Python package
-│   ├── cli.py                   # Typer CLI (train, serve, cluster)
-│   ├── server.py                # FastAPI backend (replaces Flask)
+│   ├── cli.py                   # Typer CLI (train, serve, tui, cluster)
+│   ├── tui.py                   # Textual TUI synthesizer
+│   ├── server.py                # FastAPI backend
 │   ├── config.py                # Centralized config & device detection
 │   ├── model.py                 # 2D Conv VAE + audio constants
 │   ├── dataset.py               # Load audio -> LUFS norm -> log-mel -> fixed dB norm

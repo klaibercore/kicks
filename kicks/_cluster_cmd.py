@@ -4,6 +4,7 @@ import json
 import os
 
 import numpy as np
+import soundfile as sf
 import torch
 import torchaudio
 from sklearn.decomposition import PCA
@@ -177,8 +178,12 @@ def run_cluster(data: str = "data/kicks", n_samples: int | None = None) -> None:
 
         audios = []
         for idx in cluster_indices:
-            sample_path = dataset.paths[idx]
-            audio, sr = torchaudio.load(sample_path)
+            sample_path = dataset.paths[subset_indices[idx]]
+            data, sr = sf.read(sample_path, dtype="float32")
+            if data.ndim == 1:
+                audio = torch.from_numpy(data).unsqueeze(0)
+            else:
+                audio = torch.from_numpy(data.T)
             if audio.shape[0] > 1:
                 audio = audio.mean(dim=0, keepdim=True)
             if sr != SAMPLE_RATE:
@@ -193,7 +198,7 @@ def run_cluster(data: str = "data/kicks", n_samples: int | None = None) -> None:
 
         avg_audio = torch.stack(audios).mean(dim=0)
         avg_audio = avg_audio / (avg_audio.abs().max() + 1e-8)
-        torchaudio.save(f"output/samples/cluster_avg_{k}.wav", avg_audio, SAMPLE_RATE)
+        sf.write(f"output/samples/cluster_avg_{k}.wav", avg_audio.squeeze(0).numpy(), SAMPLE_RATE)
         print(f"  Saved cluster {k} average ({len(audios)} samples)")
 
     output = {
