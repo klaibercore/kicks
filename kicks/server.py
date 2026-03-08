@@ -14,7 +14,7 @@ from sklearn.decomposition import PCA
 
 from kicks import KickDataset, KickDataloader, VAE
 from kicks.cluster import extract_latents, compute_descriptors
-from kicks.config import get_device, DATA_DIR, BEST_CHECKPOINT, N_PCS
+from kicks.config import get_device, load_vae_from_checkpoint, DATA_DIR, BEST_CHECKPOINT, N_PCS
 from kicks.model import SAMPLE_RATE
 from kicks.vocoder import load_vocoder, spec_to_audio
 
@@ -45,11 +45,7 @@ async def _lifespan(app: FastAPI):
     _state.dataset = KickDataset(data_dir)
     dataloader = KickDataloader(_state.dataset, batch_size=32, shuffle=False)
 
-    _state.model = VAE(latent_dim=32)
-    checkpoint = torch.load(BEST_CHECKPOINT, map_location=_state.device)
-    _state.model.load_state_dict(checkpoint["model"])
-    _state.model.to(_state.device)
-    _state.model.eval()
+    _state.model, _ = load_vae_from_checkpoint(BEST_CHECKPOINT, _state.device)
 
     _state.vocoder = load_vocoder(_state.device)
 
@@ -101,8 +97,8 @@ async def _lifespan(app: FastAPI):
             _state.pc_names.append(f"PC{i + 1}")
             print(f"  PC{i + 1} -> PC{i + 1} (no strong correlation)")
 
-    _state.pc_mins = [float(_state.pc_projected[:, i].min()) for i in range(N_PCS)]
-    _state.pc_maxs = [float(_state.pc_projected[:, i].max()) for i in range(N_PCS)]
+    _state.pc_mins = [float(np.percentile(_state.pc_projected[:, i], 2)) for i in range(N_PCS)]
+    _state.pc_maxs = [float(np.percentile(_state.pc_projected[:, i], 98)) for i in range(N_PCS)]
 
     print(f"PCA variance explained: {_state.pca.explained_variance_ratio_}")
     for i in range(N_PCS):

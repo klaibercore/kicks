@@ -13,7 +13,7 @@ app = typer.Typer(
 def train(
     data: str = typer.Option("data/kicks", "--data", "-d", help="Path to training data directory"),
     epochs: int = typer.Option(200, "--epochs", "-e", help="Number of training epochs"),
-    latent_dim: int = typer.Option(32, "--latent-dim", help="VAE latent dimension"),
+    latent_dim: int = typer.Option(128, "--latent-dim", help="VAE latent dimension"),
     beta: float = typer.Option(1.0, "--beta", help="KL beta weight"),
 ) -> None:
     """Train the kick drum VAE."""
@@ -22,6 +22,7 @@ def train(
     import soundfile as sf
     import torch
     from torch import optim
+    from torch.optim.lr_scheduler import CosineAnnealingLR
 
     from kicks import KickDataset, KickDataloader, VAE
     from kicks.config import get_device
@@ -39,6 +40,7 @@ def train(
     device = get_device()
     model = VAE(latent_dim=latent_dim)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
 
     param_count = sum(p.numel() for p in model.parameters())
     print(f"Model: {param_count:,} parameters, latent_dim={latent_dim}, device={device}")
@@ -47,6 +49,7 @@ def train(
         model, dataloader, optimizer,
         epochs=epochs, device=device,
         beta=beta, beta_anneal_epochs=epochs, beta_cycles=4,
+        scheduler=scheduler,
     )
 
     vocoder = load_vocoder(device)

@@ -78,5 +78,10 @@ def spec_to_audio(
         waveform = vocoder(log_mel.to(device))  # (B, 1, T)
     waveform = waveform.squeeze(1).cpu()  # (B, T)
     waveform = torchaudio.functional.highpass_biquad(waveform, SAMPLE_RATE, cutoff_freq=25.0)
+    waveform = torchaudio.functional.lowpass_biquad(waveform, SAMPLE_RATE, cutoff_freq=20000.0)
+    # Fade-out to avoid abrupt cutoff artifacts at the end of the sample.
+    fade_len = min(5000, waveform.shape[-1])
+    fade = torch.linspace(1.0, 0.0, fade_len)
+    waveform[..., -fade_len:] *= fade
     waveform = waveform / (waveform.abs().max() + 1e-8)
     return waveform

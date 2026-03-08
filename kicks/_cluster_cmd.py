@@ -10,14 +10,14 @@ import torchaudio
 from sklearn.decomposition import PCA
 from torch.utils.data import Subset
 
-from kicks import KickDataset, KickDataloader, VAE
+from kicks import KickDataset, KickDataloader
 from kicks.cluster import (
     extract_latents,
     select_n_clusters,
     fit_gmm,
     compute_descriptors,
 )
-from kicks.config import get_device, BEST_CHECKPOINT
+from kicks.config import get_device, load_vae_from_checkpoint, BEST_CHECKPOINT
 from kicks.model import SAMPLE_RATE, AUDIO_LENGTH
 
 
@@ -39,11 +39,7 @@ def run_cluster(data: str = "data/kicks", n_samples: int | None = None) -> None:
     device = get_device()
     print(f"Using device: {device}")
 
-    model = VAE(latent_dim=32)
-    checkpoint = torch.load(BEST_CHECKPOINT, map_location=device)
-    model.load_state_dict(checkpoint["model"])
-    model.to(device)
-    model.eval()
+    model, checkpoint = load_vae_from_checkpoint(BEST_CHECKPOINT, device)
     print(f"Loaded checkpoint (epoch {checkpoint['epoch']})")
 
     print("Extracting latents...")

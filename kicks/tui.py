@@ -20,7 +20,7 @@ from textual.widgets import Footer, Label, Static
 
 from kicks import KickDataset, KickDataloader, VAE
 from kicks.cluster import extract_latents, compute_descriptors
-from kicks.config import get_device, BEST_CHECKPOINT, N_PCS
+from kicks.config import get_device, load_vae_from_checkpoint, BEST_CHECKPOINT, N_PCS
 from kicks.model import SAMPLE_RATE
 from kicks.vocoder import load_vocoder, spec_to_audio
 
@@ -520,11 +520,7 @@ class KicksApp(App):
         dataloader = KickDataloader(self._dataset, batch_size=32, shuffle=False)
 
         self.call_from_thread(status.update, "LOADING VAE...")
-        self._model = VAE(latent_dim=32)
-        checkpoint = torch.load(BEST_CHECKPOINT, map_location=self._device)
-        self._model.load_state_dict(checkpoint["model"])
-        self._model.to(self._device)
-        self._model.eval()
+        self._model, _ = load_vae_from_checkpoint(BEST_CHECKPOINT, self._device)
 
         self.call_from_thread(status.update, "LOADING VOCODER...")
         self._vocoder = load_vocoder(self._device)
@@ -570,8 +566,8 @@ class KicksApp(App):
             else:
                 self._pc_names.append(f"PC{i + 1}")
 
-        self._pc_mins = [float(self._pc_projected[:, i].min()) for i in range(N_PCS)]
-        self._pc_maxs = [float(self._pc_projected[:, i].max()) for i in range(N_PCS)]
+        self._pc_mins = [float(np.percentile(self._pc_projected[:, i], 2)) for i in range(N_PCS)]
+        self._pc_maxs = [float(np.percentile(self._pc_projected[:, i], 98)) for i in range(N_PCS)]
 
         def _mount_sliders():
             panel = self.query_one("#left-panel")

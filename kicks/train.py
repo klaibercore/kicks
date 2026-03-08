@@ -6,6 +6,8 @@ from rich.progress import Progress, TextColumn, BarColumn, TimeRemainingColumn, 
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader, random_split
 
+from torch.optim.lr_scheduler import CosineAnnealingLR, LRScheduler
+
 from .loss import loss as loss_fn
 from .model import VAE
 
@@ -21,6 +23,7 @@ def train(
     beta_anneal_epochs: int = 0,
     beta_cycles: int = 4,
     val_split: float = 0.1,
+    scheduler: LRScheduler | None = None,
 ) -> dict[str, list[float]]:
     """Train the VAE. Returns per-epoch average losses for loss, recon, kl.
 
@@ -83,6 +86,8 @@ def train(
             epoch_loss.append(avg_loss)
             epoch_recon.append(avg_recon)
             epoch_kl.append(avg_kl)
+            if scheduler is not None:
+                scheduler.step()
             progress.update(task, advance=1, epoch=epoch + 1, loss=avg_loss, recon=avg_recon, kl=avg_kl)
 
             # Validation
@@ -102,6 +107,7 @@ def train(
                     "model": model.state_dict(),
                     "epoch": epoch + 1,
                     "val_loss": val_loss,
+                    "latent_dim": model.latent_dim,
                 }, save_dir + "vae_best.pth")
 
     # Save final checkpoint
@@ -109,6 +115,7 @@ def train(
         "model": model.state_dict(),
         "epoch": epochs,
         "loss_history": epoch_loss,
+        "latent_dim": model.latent_dim,
     }, save_dir + "vae_checkpoint.pth")
 
     # Plot loss components
