@@ -27,7 +27,7 @@ from kicks.vocoder import load_vocoder, spec_to_audio
 # ── Synthwave colour palette ─────────────────────────────────────────
 
 _BG_DEEP = "#0d0221"
-_BG_PANEL = "#150533"
+_BG_PANEL = "#120428"
 _NEON_CYAN = "#00fff2"
 _NEON_PINK = "#ff2975"
 _NEON_MAGENTA = "#f72585"
@@ -45,6 +45,13 @@ _WAVE_GRADIENT = ["#0a4f4c", "#00c9b7", "#00fff2", "#a855f7", "#d946ef", "#ff297
 # Spectrogram heat: deep purple -> magenta -> orange -> yellow (sunset)
 _SPEC_GRADIENT = ["#0d0221", "#2a1050", "#6b21a8", "#c026d3", "#f72585", "#ff6b35", "#ffbe0b", "#fffb47"]
 
+# Logo gradient: each line from yellow to magenta
+_LOGO_GRADIENT = [_NEON_YELLOW, _NEON_ORANGE, _NEON_ORANGE, _NEON_PINK, _NEON_MAGENTA, _NEON_PURPLE]
+
+# Per-slider neon accents
+_SLIDER_COLORS = [_NEON_CYAN, _NEON_PINK, _NEON_PURPLE, _NEON_ORANGE]
+_SLIDER_COLORS_DIM = [_DIM_CYAN, "#4a1535", "#3a1568", "#5a2a10"]
+
 # ── ASCII art header ─────────────────────────────────────────────────
 
 _LOGO = r"""
@@ -54,10 +61,6 @@ _LOGO = r"""
 ▓██ █▄ ░██░▒▓▓▄ ▄██▓██ █▄   ▒   ██▒
 ▒██▒ █▄░██░▒ ▓███▀ ▒██▒ █▄▒██████▒▒
 ▒ ▒▒ ▓▒░▓  ░ ░▒ ▒  ▒ ▒▒ ▓▒▒ ▒▓▒ ▒ ░
-"""
-
-_SUN = r"""        ·  ·  ·  · ╱────────────╲ ·  ·  ·  ·
-          ·  ·  ╱────────────────╲  ·  ·
 """
 
 # ── Waveform visualisation ───────────────────────────────────────────
@@ -170,16 +173,12 @@ def _render_spectrogram_rich(spec: np.ndarray, width: int = WAVEFORM_WIDTH, heig
 
 _BAR_WIDTH = 22
 _BAR_FILL = "━"
-_BAR_EMPTY = "─"
-_BAR_KNOB = "◆"
-
-# Per-slider neon accents
-_SLIDER_COLORS = [_NEON_CYAN, _NEON_PINK, _NEON_PURPLE, _NEON_ORANGE]
-_SLIDER_COLORS_DIM = [_DIM_CYAN, "#4a1535", "#3a1568", "#5a2a10"]
+_BAR_EMPTY = "╌"
+_BAR_KNOB = "●"
 
 
 class SliderBar(Static, can_focus=True):
-    """A focusable neon horizontal slider bar."""
+    """A focusable neon horizontal slider bar with gradient fill."""
 
     DEFAULT_CSS = """
     SliderBar {
@@ -218,8 +217,15 @@ class SliderBar(Static, can_focus=True):
         else:
             text.append("   ", style=_TEXT_DIM)
         text.append(f"{self.pc_name:<8}", style=f"bold {neon}" if active else _TEXT_DIM)
-        text.append(f" {val:.2f}  ", style=_TEXT_BRIGHT if active else _TEXT_DIM)
-        text.append(_BAR_FILL * filled, style=f"bold {neon}" if active else dim)
+        text.append(f" {self.value:3d}%  ", style=_TEXT_BRIGHT if active else _TEXT_DIM)
+        # Gradient fill: each bar segment gets progressively brighter
+        for j in range(filled):
+            frac = (j + 1) / _BAR_WIDTH
+            if active:
+                style = f"bold {neon}" if frac > 0.5 else neon
+            else:
+                style = dim
+            text.append(_BAR_FILL, style=style)
         text.append(_BAR_KNOB, style=f"bold {neon}" if active else _TEXT_DIM)
         text.append(_BAR_EMPTY * empty, style=_DIM_PURPLE)
         return text
@@ -247,7 +253,7 @@ class SliderBar(Static, can_focus=True):
 
 
 class LogoWidget(Static):
-    """Synthwave ASCII logo."""
+    """Synthwave ASCII logo with sunset gradient."""
 
     DEFAULT_CSS = """
     LogoWidget {
@@ -262,14 +268,16 @@ class LogoWidget(Static):
 
     def on_mount(self) -> None:
         text = Text()
-        for line in _LOGO.strip("\n").split("\n"):
-            text.append(line, style=f"bold {_NEON_MAGENTA}")
+        lines = _LOGO.strip("\n").split("\n")
+        for i, line in enumerate(lines):
+            ci = min(i, len(_LOGO_GRADIENT) - 1)
+            text.append(line, style=f"bold {_LOGO_GRADIENT[ci]}")
             text.append("\n")
         self.update(text)
 
 
 class SunWidget(Static):
-    """Retrowave sun/horizon."""
+    """Retrowave sun with horizontal stripes and perspective grid."""
 
     DEFAULT_CSS = """
     SunWidget {
@@ -280,21 +288,47 @@ class SunWidget(Static):
 
     def on_mount(self) -> None:
         text = Text()
-        sun_colors = [_NEON_YELLOW, _NEON_ORANGE, _NEON_PINK, _NEON_MAGENTA, _NEON_PURPLE]
-        lines = [
-            "           ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░",
-            "         ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░",
-            "        ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░",
-            "       ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░",
-            "        ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░",
+        # Solid top of the sun (yellow -> orange)
+        sun_top = [
+            ("            ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░", _NEON_YELLOW),
+            ("          ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░", _NEON_YELLOW),
+            ("        ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░", "#ffaa00"),
+            ("       ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░", "#ff8800"),
+            ("       ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░", _NEON_ORANGE),
+            ("        ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░", _NEON_ORANGE),
         ]
-        for i, line in enumerate(lines):
-            ci = min(i, len(sun_colors) - 1)
-            text.append(line, style=sun_colors[ci])
+        for line, color in sun_top:
+            text.append(line, style=color)
             text.append("\n")
-        # Horizon grid lines
-        grid = "  ─ ─ ─ ─ ─ ─ ─ ─ ─ ╱─────────────────────╲─ ─ ─ ─ ─ ─ ─ ─ ─ ─"
-        text.append(grid, style=_DIM_PURPLE)
+
+        # Striped lower section (gaps widen toward bottom)
+        stripes = [
+            ("        ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░", _NEON_PINK),
+            ("          ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░", _NEON_PINK),
+            ("            ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░", _NEON_MAGENTA),
+            ("              ░░░░░░░░░░░░░░░░░░░░░░░░░░░░", _NEON_MAGENTA),
+        ]
+        for i, (line, color) in enumerate(stripes):
+            text.append("\n")  # gap before each stripe
+            text.append(line, style=color)
+            text.append("\n")
+
+        # Horizon line
+        text.append("  " + "═" * 68, style=_NEON_PURPLE)
+        text.append("\n")
+
+        # Perspective grid (fading into the distance)
+        grid_colors = [_DIM_PURPLE, _GRID_COLOR, "#1a0830"]
+        grid_lines = [
+            "  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─",
+            "    ─    ─    ─    ─    ─    ─    ─    ─    ─    ─    ─    ─    ─    ",
+            "       ─      ─      ─      ─      ─      ─      ─      ─         ",
+        ]
+        for i, line in enumerate(grid_lines):
+            ci = min(i, len(grid_colors) - 1)
+            text.append(line, style=grid_colors[ci])
+            text.append("\n")
+
         self.update(text)
 
 
@@ -341,7 +375,7 @@ class StatusLine(Static):
 
 
 class NeonLabel(Static):
-    """A glowing section header."""
+    """A glowing section header with decorative box-drawing lines."""
 
     DEFAULT_CSS = """
     NeonLabel {
@@ -357,8 +391,10 @@ class NeonLabel(Static):
 
     def on_mount(self) -> None:
         text = Text()
-        text.append("  ", style=f"on {self._color}")
-        text.append(f" {self._label}", style=f"bold {self._color}")
+        text.append("  ═══╡ ", style=_DIM_PURPLE)
+        text.append(self._label, style=f"bold {self._color}")
+        text.append(" ╞", style=_DIM_PURPLE)
+        text.append("═" * 30, style=_DIM_PURPLE)
         self.update(text)
 
 
@@ -375,8 +411,10 @@ class GenCounter(Static):
 
     def set_count(self, n: int, desc: str = "") -> None:
         text = Text()
-        text.append("  GEN ", style=f"bold {_NEON_PINK}")
-        text.append(f"#{n:03d}", style=f"bold {_NEON_YELLOW}")
+        text.append("  ╟ ", style=_DIM_PURPLE)
+        text.append("GEN", style=f"bold {_NEON_PINK}")
+        text.append(f" #{n:03d}", style=f"bold {_NEON_YELLOW}")
+        text.append(" ╢", style=_DIM_PURPLE)
         if desc:
             text.append(f"  {desc}", style=_TEXT_DIM)
         self.update(text)
@@ -409,7 +447,7 @@ class KicksApp(App):
     #left-panel {{
         width: 40;
         min-width: 36;
-        border-right: thick {_DIM_PURPLE};
+        border-right: double {_NEON_PURPLE};
         padding: 1 0;
         background: {_BG_PANEL};
     }}
@@ -504,7 +542,7 @@ class KicksApp(App):
                 yield NeonLabel("SPECTROGRAM", color=_NEON_ORANGE)
                 with Container(id="spec-container"):
                     yield SpectrogramDisplay(id="spectrogram")
-        yield StatusLine("LOADING MODEL...", id="status-line")
+        yield StatusLine("INITIALIZING SYSTEM...", id="status-line")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -514,18 +552,18 @@ class KicksApp(App):
     def _load_model(self) -> None:
         status = self.query_one("#status-line", StatusLine)
 
-        self.call_from_thread(status.update, "LOADING DATASET...")
+        self.call_from_thread(status.update, "▸ LOADING DATASET...")
         self._device = get_device()
         self._dataset = KickDataset(self._data_dir)
         dataloader = KickDataloader(self._dataset, batch_size=32, shuffle=False)
 
-        self.call_from_thread(status.update, "LOADING VAE...")
+        self.call_from_thread(status.update, "▸ LOADING VAE...")
         self._model, _ = load_vae_from_checkpoint(BEST_CHECKPOINT, self._device)
 
-        self.call_from_thread(status.update, "LOADING VOCODER...")
+        self.call_from_thread(status.update, "▸ LOADING VOCODER...")
         self._vocoder = load_vocoder(self._device)
 
-        self.call_from_thread(status.update, "COMPUTING PCA...")
+        self.call_from_thread(status.update, "▸ COMPUTING LATENT SPACE...")
         latents, spectrograms = extract_latents(self._model, dataloader, self._device)
 
         descriptors = [compute_descriptors(s) for s in spectrograms]
@@ -574,7 +612,7 @@ class KicksApp(App):
             counter = self.query_one("#gen-counter", GenCounter)
             for i in range(N_PCS):
                 panel.mount(SliderBar(i, self._pc_names[i], id=f"pc_slider_{i}"), before=counter)
-            status.update("READY  //  SPACE generate  |  LEFT/RIGHT adjust  |  TAB switch")
+            status.update("READY  ──  SPACE generate  │  ◂ ▸ adjust  │  TAB switch")
 
         self.call_from_thread(_mount_sliders)
         self._loaded = True
@@ -597,7 +635,7 @@ class KicksApp(App):
     @work(thread=True)
     def _do_generate(self) -> None:
         status = self.query_one("#status-line", StatusLine)
-        self.call_from_thread(status.update, "GENERATING...")
+        self.call_from_thread(status.update, "▸ SYNTHESIZING...")
 
         raw_values = self._get_pc_values()
         pc_values = []
@@ -622,13 +660,14 @@ class KicksApp(App):
         self._last_spec = spec_viz
 
         gen_count = self._gen_count
+        peak_db = 20 * np.log10(np.abs(audio_np).max() + 1e-8)
         desc = "  ".join(f"{self._pc_names[i]}={raw_values[i]:.2f}" for i in range(N_PCS))
 
         def _update_viz():
             self.query_one("#waveform", WaveformDisplay).set_waveform(audio_np)
             self.query_one("#spectrogram", SpectrogramDisplay).set_spectrogram(spec_viz)
             self.query_one("#gen-counter", GenCounter).set_count(gen_count, desc)
-            status.update(f"READY  //  SPACE generate  |  LEFT/RIGHT adjust  |  TAB switch")
+            status.update(f"READY  ──  peak {peak_db:.1f} dB  │  SPACE generate  │  ◂ ▸ adjust")
 
         self.call_from_thread(_update_viz)
         self._play_audio(audio_np)
@@ -669,7 +708,7 @@ class KicksApp(App):
         sf.write(path, self._last_audio, SAMPLE_RATE)
         status = self.query_one("#status-line", StatusLine)
         text = Text()
-        text.append("SAVED ", style=f"bold {_NEON_CYAN}")
+        text.append("  SAVED ", style=f"bold {_NEON_CYAN}")
         text.append(path, style=f"bold {_NEON_YELLOW}")
         status.update(text)
 
