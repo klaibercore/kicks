@@ -10,9 +10,7 @@ export function useSynth() {
   const [values, setValues] = useState<number[]>([]);
   const [status, setStatus] = useState("Loading...");
   const playerRef = useRef<HTMLAudioElement>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const blobUrlRef = useRef<string | null>(null);
-  const initialGenDone = useRef(false);
 
   useEffect(() => {
     fetch(`${API}/config`)
@@ -45,34 +43,26 @@ export function useSynth() {
       .catch(() => setStatus("Error generating"));
   }, []);
 
-  useEffect(() => {
-    if (values.length > 0 && !initialGenDone.current) {
-      initialGenDone.current = true;
-      generate(values);
-    }
-  }, [values, generate]);
-
   const handleSliderChange = useCallback(
     (index: number, newValue: number[]) => {
       setValues((prev) => {
         const updated = [...prev];
         updated[index] = newValue[0];
-
-        if (debounceRef.current) clearTimeout(debounceRef.current);
-        debounceRef.current = setTimeout(() => generate(updated), 150);
-
         return updated;
       });
     },
-    [generate],
+    [],
   );
+
+  const handleGenerate = useCallback(() => {
+    generate(values);
+  }, [generate, values]);
 
   const randomize = useCallback(() => {
     if (!sliders.length) return;
     const randomized = sliders.map(() => Math.random());
     setValues(randomized);
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => generate(randomized), 150);
+    generate(randomized);
   }, [sliders, generate]);
 
   const download = useCallback(() => {
@@ -89,6 +79,7 @@ export function useSynth() {
     status,
     playerRef,
     handleSliderChange,
+    handleGenerate,
     randomize,
     download,
   };

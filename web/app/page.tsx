@@ -13,6 +13,7 @@ export default function Home() {
     status,
     playerRef,
     handleSliderChange,
+    handleGenerate,
     randomize,
     download,
   } = useSynth();
@@ -74,6 +75,15 @@ export default function Home() {
                 );
               })}
             </div>
+
+            {/* Generate Button */}
+            <button
+              onClick={handleGenerate}
+              disabled={status === "Generating..." || sliders.length === 0}
+              className="w-full py-3.5 rounded-xl border border-pink-500/40 bg-pink-500/15 text-base font-bold tracking-widest uppercase text-pink-300 hover:bg-pink-500/25 hover:border-pink-500/60 hover:shadow-lg hover:shadow-pink-500/20 disabled:opacity-50 disabled:cursor-wait transition-all duration-200"
+            >
+              {status === "Generating..." ? "Generating..." : "Generate"}
+            </button>
 
             {/* Action Buttons */}
             <div className="flex gap-3">

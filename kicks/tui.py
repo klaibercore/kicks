@@ -16,7 +16,7 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.message import Message
 from textual.reactive import reactive
-from textual.widgets import Footer, Label, Static
+from textual.widgets import Button, Footer, Label, Static
 
 from kicks import KickDataset, KickDataloader, VAE
 from kicks.cluster import extract_latents, compute_descriptors
@@ -468,6 +468,26 @@ class KicksApp(App):
         margin: 0 0 1 0;
     }}
 
+    #generate-btn {{
+        margin: 1 2;
+        min-width: 20;
+        background: {_BG_DEEP};
+        color: {_NEON_PINK};
+        border: tall {_NEON_PINK};
+        text-style: bold;
+    }}
+
+    #generate-btn:hover {{
+        background: {_NEON_PINK};
+        color: {_BG_DEEP};
+    }}
+
+    #generate-btn:focus {{
+        background: {_NEON_MAGENTA};
+        color: white;
+        border: tall {_NEON_CYAN};
+    }}
+
     #gen-counter {{
         height: 1;
         margin: 1 0 0 0;
@@ -532,7 +552,8 @@ class KicksApp(App):
             with Vertical(id="left-panel"):
                 yield LogoWidget(id="logo")
                 yield NeonLabel("CONTROLS", color=_NEON_PINK)
-                # Sliders mount after loading
+                # Sliders mount after loading (before #generate-btn)
+                yield Button("▶  GENERATE", id="generate-btn", disabled=True)
                 yield GenCounter(id="gen-counter")
             with Vertical(id="right-panel"):
                 yield SunWidget(id="sun")
@@ -609,10 +630,11 @@ class KicksApp(App):
 
         def _mount_sliders():
             panel = self.query_one("#left-panel")
-            counter = self.query_one("#gen-counter", GenCounter)
+            btn = self.query_one("#generate-btn", Button)
             for i in range(N_PCS):
-                panel.mount(SliderBar(i, self._pc_names[i], id=f"pc_slider_{i}"), before=counter)
-            status.update("READY  ──  SPACE generate  │  ◂ ▸ adjust  │  TAB switch")
+                panel.mount(SliderBar(i, self._pc_names[i], id=f"pc_slider_{i}"), before=btn)
+            btn.disabled = False
+            status.update("READY  ──  SPACE or ▶ generate  │  ◂ ▸ adjust  │  TAB switch")
 
         self.call_from_thread(_mount_sliders)
         self._loaded = True
@@ -626,6 +648,10 @@ class KicksApp(App):
             except Exception:
                 vals.append(0.5)
         return vals
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "generate-btn":
+            self.action_generate()
 
     def action_generate(self) -> None:
         if not self._loaded:
