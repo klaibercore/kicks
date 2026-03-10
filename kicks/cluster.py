@@ -56,13 +56,13 @@ def compute_descriptors(spec_tensor: torch.Tensor) -> dict[str, float]:
     
     Mel band frequency mapping (approximate):
     - Bands 0-12:  ~20-80 Hz (sub-bass)
-    - Bands 12-30: ~80-250 Hz (bass)  
+    - Bands 12-30: ~80-250 Hz (bass)
     - Bands 30-50: ~250-1k Hz (low-mids)
     - Bands 50-128: ~1k-8k Hz (highs)
-    
-    Time frame mapping (at 22kHz/512hop = ~23ms/frame, 256 frames = ~5.9s max):
-    - Frames 0-3:    Transient/attack (~0-70ms) - EXCLUDED for stability
-    - Frames 3-30:   Body (~70-700ms)
+
+    Time frame mapping (at 44.1kHz/256hop = ~5.8ms/frame, 256 frames = ~1.49s):
+    - Frames 0-3:    Transient/attack (~0-17ms) - EXCLUDED for stability
+    - Frames 3-30:   Body (~17-174ms)
     - Frames 30+:    Decay tail
     
     Excludes transient (first 3 frames) from most calculations for stability.

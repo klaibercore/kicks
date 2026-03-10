@@ -3,8 +3,11 @@
 import glob
 import itertools
 import os
+import warnings
 
 import bigvgan
+import numpy as np
+import pyloudnorm as pyln
 import soundfile as sf
 import torch
 import torchaudio
@@ -18,17 +21,25 @@ from rich.progress import (
 )
 from torch.utils.data import DataLoader, Dataset
 
-from .model import AUDIO_LENGTH, SAMPLE_RATE
+from .dataset import TARGET_LUFS
+from .model import AUDIO_LENGTH, SAMPLE_RATE, N_FFT, N_MELS, HOP_LENGTH, WIN_SIZE, FMIN, FMAX
 from .vocoder import BIGVGAN_MODEL, _patch_bigvgan_from_pretrained
 
 _patch_bigvgan_from_pretrained()
 
 
 class _KickAudioDataset(Dataset):
-    """Loads .wav kick samples as peak-normalized waveforms for vocoder training."""
+    """Loads .wav kick samples as LUFS-normalized waveforms for vocoder training.
+
+    Uses the same audio pre-processing as KickDataset (LUFS normalization to
+    -14 dB) so the vocoder is fine-tuned on the same amplitude distribution
+    the VAE was trained on.
+    """
 
     def __init__(self, dir: str) -> None:
         self.waveforms: list[torch.Tensor] = []
+        lufs_meter = pyln.Meter(SAMPLE_RATE)
+
         for file in sorted(os.listdir(dir)):
             if not file.endswith(".wav"):
                 continue
@@ -45,7 +56,17 @@ class _KickAudioDataset(Dataset):
                 audio = audio[:, :AUDIO_LENGTH]
             elif audio.shape[-1] < AUDIO_LENGTH:
                 audio = torch.nn.functional.pad(audio, (0, AUDIO_LENGTH - audio.shape[-1]))
-            audio = audio / (audio.abs().max() + 1e-8)
+
+            # LUFS loudness normalization (matches KickDataset in dataset.py)
+            audio_np = audio.squeeze(0).numpy()
+            loudness = lufs_meter.integrated_loudness(audio_np)
+            if np.isfinite(loudness):
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message="Possible clipped samples", module="pyloudnorm")
+                    audio_np = pyln.normalize.loudness(audio_np, loudness, TARGET_LUFS)
+                audio_np = np.clip(audio_np, -1.0, 1.0)
+                audio = torch.from_numpy(audio_np).unsqueeze(0).float()
+
             self.waveforms.append(audio.squeeze(0))
         if not self.waveforms:
             raise RuntimeError(f"No .wav files found in {dir}")
@@ -86,6 +107,16 @@ def finetune(
     # Load generator
     generator = bigvgan.BigVGAN.from_pretrained(BIGVGAN_MODEL, use_cuda_kernel=False)
     h = generator.h
+
+    # Verify BigVGAN's config matches our centralized audio constants.
+    # A mismatch here means the vocoder would be fine-tuned on a different
+    # mel representation than the VAE was trained on.
+    assert h.sampling_rate == SAMPLE_RATE, f"sample rate: BigVGAN {h.sampling_rate} != {SAMPLE_RATE}"
+    assert h.n_fft == N_FFT, f"n_fft: BigVGAN {h.n_fft} != {N_FFT}"
+    assert h.num_mels == N_MELS, f"num_mels: BigVGAN {h.num_mels} != {N_MELS}"
+    assert h.hop_size == HOP_LENGTH, f"hop_size: BigVGAN {h.hop_size} != {HOP_LENGTH}"
+    assert h.win_size == WIN_SIZE, f"win_size: BigVGAN {h.win_size} != {WIN_SIZE}"
+
     generator = generator.train().to(device)
 
     # Freeze all but last 2 upsampling blocks + conv_post
@@ -170,9 +201,9 @@ def finetune(
             for step, wav in enumerate(dataloader):
                 wav = wav.to(device).unsqueeze(1)
                 mel = mel_spectrogram(
-                    wav.squeeze(1), h.n_fft, h.num_mels,
-                    h.sampling_rate, h.hop_size, h.win_size,
-                    h.fmin, h.fmax, center=False,
+                    wav.squeeze(1), N_FFT, N_MELS,
+                    SAMPLE_RATE, HOP_LENGTH, WIN_SIZE,
+                    FMIN, FMAX, center=False,
                 ).to(device)
 
                 # --- Discriminator step ---

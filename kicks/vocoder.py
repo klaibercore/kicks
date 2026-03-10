@@ -42,7 +42,7 @@ def load_vocoder(device: torch.device) -> bigvgan.BigVGAN:
         model.load_state_dict(checkpoint["generator"])
         print(f"Loaded fine-tuned vocoder (epoch {checkpoint['epoch']})")
     else:
-        print("Using pretrained BigVGAN (run finetune_vocoder.py to improve)")
+        print("Using pretrained BigVGAN (run `kicks fine-tune` to improve)")
 
     model.remove_weight_norm()
     return model.eval().to(device)
