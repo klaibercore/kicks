@@ -108,3 +108,27 @@ def cluster(
     from kicks._cluster_cmd import run_cluster
 
     run_cluster(data=data, n_samples=samples if samples > 0 else None)
+
+
+@app.command("fine-tune")
+def fine_tune(
+    data: str = typer.Option("data/kicks", "--data", "-d", help="Path to training data directory"),
+    epochs: int = typer.Option(200, "--epochs", "-e", help="Number of training epochs"),
+    batch_size: int = typer.Option(2, "--batch-size", "-b", help="Batch size"),
+    lr: float = typer.Option(1e-4, "--lr", help="Learning rate"),
+    grad_accum: int = typer.Option(4, "--grad-accum", help="Gradient accumulation steps"),
+    save_every: int = typer.Option(50, "--save-every", help="Save checkpoint every N epochs"),
+    save_dir: str = typer.Option("models/vocoder", "--save-dir", help="Directory for vocoder checkpoints"),
+) -> None:
+    """Fine-tune the BigVGAN vocoder on kick drum samples."""
+    from kicks.finetune import finetune
+
+    finetune(
+        data_dir=data,
+        save_dir=save_dir,
+        epochs=epochs,
+        batch_size=batch_size,
+        lr=lr,
+        grad_accum=grad_accum,
+        save_every=save_every,
+    )

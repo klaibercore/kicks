@@ -21,13 +21,13 @@ dependencies = [
     "textual>=8.0.2",
 ]
 
-[project.optional-dependencies]
+[project.scripts]
+kicks = "kicks.cli:app"
+
+[dependency-groups]
 finetune = [
     "huggingface_hub>=0.36.2",
 ]
-
-[project.scripts]
-kicks = "kicks.cli:app"
 
 [build-system]
 requires = ["hatchling"]
