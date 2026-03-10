@@ -10,12 +10,12 @@ Kick samples (.wav)
   -> Log-mel spectrograms (128x256)
   -> Fixed dB normalisation [-80, 0] -> [0, 1]
   -> Beta-VAE training (beta=1.0, cyclical annealing)
-  -> Latent vectors (32-dim)
-  -> PCA -> 4 principal components
-  -> Slider UI (Decay, Brightness, Subby, Click)
+  -> Latent vectors (128-dim)
+  -> PCA -> 4 principal components (auto-named by perceptual correlation)
+  -> Slider UI (e.g. Sub, Punch, Click, Bright)
   -> PCA inverse -> z vector
   -> VAE decoder -> spectrogram
-  -> BigVGAN vocoder -> audio
+  -> BigVGAN vocoder (optionally fine-tuned) -> audio
 ```
 
 ## Setup
@@ -57,18 +57,38 @@ Place `.wav` kick drum samples in `data/kicks/`.
 uv run kicks train
 ```
 
-Trains for 200 epochs with cyclical beta annealing (4 cycles, beta ramping 0 -> 1.0 per cycle). Monitors reconstruction loss (spectral convergence + L1) and KL divergence separately. Saves `models/best.pth` (best validation loss) and `models/checkpoint.pth` (final). Generates 20 reconstructions and 10 latent samples in `output/`.
+Trains for 200 epochs with cyclical beta annealing (4 cycles, beta ramping 0 -> 1.0 per cycle). Monitors reconstruction loss (spectral convergence + L1) and KL divergence separately. Saves `models/vae_best.pth` (best validation loss). Generates 20 reconstructions and 10 latent samples in `output/`.
 
 Options:
 
 ```
 --data, -d    Path to training data (default: data/kicks)
 --epochs, -e  Number of epochs (default: 200)
---latent-dim  Latent dimension (default: 32)
+--latent-dim  Latent dimension (default: 128)
 --beta        KL beta weight (default: 1.0)
 ```
 
-### 2. Synthesize kicks
+### 2. Fine-tune vocoder (optional)
+
+```bash
+uv run kicks fine-tune
+```
+
+Fine-tunes the BigVGAN vocoder on your kick samples using GAN training (generator + multi-period/CQT discriminators). Freezes all but the last 2 upsampling blocks. Saves best/checkpoint/final weights to `models/vocoder/`. Supports resuming from checkpoints automatically.
+
+Options:
+
+```
+--data, -d       Path to training data (default: data/kicks)
+--epochs, -e     Number of epochs (default: 200)
+--batch-size, -b Batch size (default: 2)
+--lr             Learning rate (default: 1e-4)
+--grad-accum     Gradient accumulation steps (default: 4)
+--save-every     Save checkpoint every N epochs (default: 50)
+--save-dir       Directory for vocoder checkpoints (default: models/vocoder)
+```
+
+### 3. Synthesize kicks
 
 #### Terminal UI (no browser needed)
 
@@ -76,7 +96,19 @@ Options:
 uv run kicks tui
 ```
 
-A full synthesizer in your terminal. Use **Tab** to switch between sliders, **Left/Right** to adjust, **Space** to generate & play, **S** to save, and **R** to randomize.
+A synthwave-themed synthesizer in your terminal with waveform and spectrogram displays. PCA sliders are auto-named by perceptual correlation (e.g. Sub, Punch, Click, Bright).
+
+| Key | Action |
+|-----|--------|
+| Tab | Switch between sliders |
+| Left/Right | Fine adjust (±2%) |
+| Shift+Left/Right | Coarse adjust (±10%) |
+| Space | Generate & play |
+| P | Replay last |
+| S | Save WAV |
+| R | Randomize |
+| 0 | Reset sliders to 50% |
+| Q | Quit |
 
 #### Web UI
 
@@ -94,9 +126,9 @@ cd web && npm run dev
 
 Open [http://localhost:3000](http://localhost:3000). Move the sliders to generate kick drums in real-time. Use **Randomise** to explore the latent space and **Download WAV** to save kicks.
 
-API docs available at [http://localhost:8080/docs](http://localhost:8080/docs).
+A standalone HTML UI is also available at [http://localhost:8080](http://localhost:8080) (no Node.js required). API docs at [http://localhost:8080/docs](http://localhost:8080/docs).
 
-### 3. Cluster + visualize
+### 4. Cluster + visualize
 
 ```bash
 uv run kicks cluster
@@ -114,7 +146,7 @@ Options:
 
 ## Model
 
-2D Convolutional VAE (~998K parameters at latent_dim=32).
+2D Convolutional VAE (latent_dim=128).
 
 | Setting | Value |
 |---------|-------|
@@ -123,8 +155,9 @@ Options:
 | Audio length | ~1.49s (65536 samples) |
 | N_FFT | 1024 |
 | HOP_LENGTH | 256 |
+| WIN_SIZE | 1024 |
 | N_MELS | 128 |
-| Latent dim | 32 |
+| Latent dim | 128 |
 | Beta | 1.0 (cyclical annealing, 4 cycles) |
 | Vocoder | BigVGAN v2 (MIT, pretrained at 44kHz) |
 
@@ -133,6 +166,7 @@ Options:
 - **Loss**: Spectral convergence + L1 + beta * KL
 - **Pre-processing**: LUFS loudness normalisation to -14 LUFS, fixed dB normalisation [-80, 0] -> [0, 1]
 - **Training**: 10% validation split, best checkpoint saved by val loss
+- **PCA slider naming**: Auto-correlates PCs with perceptual descriptors (sub, punch, click, bright, decay) and flips negative axes
 
 ## Project structure
 
@@ -143,9 +177,9 @@ kicks/
 ├── app.py                       # Legacy shim -> kicks serve
 ├── cluster.py                   # Legacy shim -> kicks cluster
 ├── kicks/                       # Core Python package
-│   ├── cli.py                   # Typer CLI (train, serve, tui, cluster)
-│   ├── tui.py                   # Textual TUI synthesizer
-│   ├── server.py                # FastAPI backend
+│   ├── cli.py                   # Typer CLI (train, serve, tui, cluster, fine-tune)
+│   ├── tui.py                   # Textual TUI synthesizer (synthwave theme)
+│   ├── server.py                # FastAPI backend + standalone HTML UI
 │   ├── config.py                # Centralized config & device detection
 │   ├── model.py                 # 2D Conv VAE + audio constants
 │   ├── dataset.py               # Load audio -> LUFS norm -> log-mel -> fixed dB norm
@@ -153,6 +187,7 @@ kicks/
 │   ├── train.py                 # Training loop with cyclical beta annealing
 │   ├── loss.py                  # Spectral convergence + L1 + beta * KL
 │   ├── vocoder.py               # BigVGAN vocoder (spec -> audio)
+│   ├── finetune.py              # BigVGAN vocoder fine-tuning (GAN training)
 │   ├── cluster.py               # GMM, PCA, descriptors
 │   └── _cluster_cmd.py          # Cluster command implementation
 ├── web/                         # Next.js + shadcn/ui frontend
