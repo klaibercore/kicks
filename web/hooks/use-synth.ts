@@ -11,6 +11,7 @@ export function useSynth() {
   const [status, setStatus] = useState("Loading...");
   const [spectrogram, setSpectrogram] = useState<number[][] | null>(null);
   const [waveformData, setWaveformData] = useState<number[] | null>(null);
+  const [kickBuffer, setKickBuffer] = useState<AudioBuffer | null>(null);
   const playerRef = useRef<HTMLAudioElement>(null);
   const blobUrlRef = useRef<string | null>(null);
 
@@ -46,6 +47,7 @@ export function useSynth() {
         const arrayBuf = await blob.arrayBuffer();
         const actx = new AudioContext();
         const audioBuf = await actx.decodeAudioData(arrayBuf);
+        setKickBuffer(audioBuf);
         const raw = audioBuf.getChannelData(0);
         const n = 256;
         const block = Math.floor(raw.length / n);
@@ -105,6 +107,7 @@ export function useSynth() {
     playerRef,
     spectrogram,
     waveformData,
+    kickBuffer,
     handleSliderChange,
     handleGenerate,
     randomize,

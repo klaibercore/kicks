@@ -8,6 +8,7 @@ import { WaveBackground } from "@/components/synth/wave-background";
 import { WaveformVis } from "@/components/synth/waveform-vis";
 import { SpectrogramVis } from "@/components/synth/spectrogram-vis";
 import { WaveformViewerVis } from "@/components/synth/waveform-viewer";
+import { Sequencer } from "@/components/synth/sequencer";
 import { useSynth } from "@/hooks/use-synth";
 
 export default function Home() {
@@ -18,6 +19,7 @@ export default function Home() {
     playerRef,
     spectrogram,
     waveformData,
+    kickBuffer,
     handleSliderChange,
     handleGenerate,
     randomize,
@@ -28,7 +30,7 @@ export default function Home() {
     <>
       <WaveBackground />
 
-      <div className="relative z-10 min-h-screen flex flex-col items-center justify-center px-4 sm:px-6 py-8">
+      <div className="relative z-10 min-h-screen flex flex-col items-center px-4 sm:px-6 py-8">
         {/* Header */}
         <div className="mb-10 text-center">
           <h1 className="text-5xl sm:text-6xl font-black tracking-tighter mb-3 bg-gradient-to-r from-violet-400 via-pink-400 to-emerald-400 bg-clip-text text-transparent">
@@ -152,6 +154,16 @@ export default function Home() {
             <WaveformViewerVis waveformData={waveformData} />
           </Card>
         </div>{/* end 3-column */}
+
+        {/* Sequencer */}
+        <Card className="w-full mt-6 border-white/[0.08] bg-white/[0.03] backdrop-blur-xl shadow-2xl shadow-violet-500/5 py-0">
+          <CardContent className="p-4 sm:p-6">
+            <label className="text-sm font-semibold tracking-wide uppercase text-muted-foreground block mb-4">
+              Sequencer
+            </label>
+            <Sequencer kickBuffer={kickBuffer} />
+          </CardContent>
+        </Card>
 
         {/* Footer */}
         <div className="mt-8 text-center">
