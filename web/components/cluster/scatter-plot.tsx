@@ -238,7 +238,7 @@ export function ScatterPlot({
       <canvas
         ref={canvasRef}
         className="w-full"
-        style={{ height: 240, minHeight: 200 }}
+        style={{ height: 300, minHeight: 240 }}
         onClick={handleCanvasClick}
         onMouseMove={handleCanvasMove}
         onMouseLeave={() => setHoveredIdx(null)}

@@ -83,6 +83,8 @@ def run_cluster(data: str = "data/kicks", n_samples: int | None = None) -> None:
     for i, idx in enumerate(subset_indices):
         sample_path = dataset.paths[idx]
         filename = os.path.basename(sample_path)
+        info = sf.info(sample_path)
+        duration_ms = float(info.frames / info.samplerate * 1000)
         audio_data.append({
             "sample_idx": i,
             "filename": filename,
@@ -93,6 +95,7 @@ def run_cluster(data: str = "data/kicks", n_samples: int | None = None) -> None:
             "pc3": float(desc_pca[i, 2]),
             "descriptors": descriptors[i],
             "probs": cluster_probs[i].tolist(),
+            "duration_ms": duration_ms,
         })
 
     print("Computing analytics...")
@@ -121,6 +124,21 @@ def run_cluster(data: str = "data/kicks", n_samples: int | None = None) -> None:
             "mean": float(dv.mean()), "std": float(dv.std()),
             "min": float(dv.min()), "max": float(dv.max()),
         }
+
+    # Descriptor-descriptor Pearson correlations (5x5)
+    descriptor_correlations = {}
+    for dk1 in desc_keys:
+        d1 = desc_arrays[dk1]
+        d1_mean, d1_std = d1.mean(), d1.std()
+        corrs = {}
+        for dk2 in desc_keys:
+            d2 = desc_arrays[dk2]
+            d2_mean, d2_std = d2.mean(), d2.std()
+            if d1_std > 0 and d2_std > 0:
+                corrs[dk2] = float(((d1 - d1_mean) * (d2 - d2_mean)).mean() / (d1_std * d2_std))
+            else:
+                corrs[dk2] = 0.0
+        descriptor_correlations[dk1] = corrs
 
     # PCA loadings
     pca_loadings = {}
@@ -201,17 +219,34 @@ def run_cluster(data: str = "data/kicks", n_samples: int | None = None) -> None:
         "pca_variance_explained": pca.explained_variance_ratio_.tolist(),
         "pca_source": "descriptors_zscore",
         "n_clusters": best_k,
+        "corpus": {
+            "sample_rate": SAMPLE_RATE,
+            "audio_length_ms": float(AUDIO_LENGTH / SAMPLE_RATE * 1000),
+            "n_total": total,
+            "data_dir": data,
+        },
         "samples": audio_data,
         "cluster_averages": {str(k): v for k, v in cluster_averages.items()},
         "pc_names": pc_names,
         "pca_loadings": pca_loadings,
         "pc_descriptor_correlations": pc_descriptor_correlations,
+        "descriptor_correlations": descriptor_correlations,
         "cluster_profiles": cluster_profiles,
         "descriptor_stats": descriptor_stats,
     }
 
+    class _NumpyEncoder(json.JSONEncoder):
+        def default(self, o):
+            if isinstance(o, np.ndarray):
+                return o.tolist()
+            if isinstance(o, (np.integer,)):
+                return int(o)
+            if isinstance(o, (np.floating,)):
+                return float(o)
+            return super().default(o)
+
     with open("output/cluster_analysis.json", "w") as f:
-        json.dump(output, f, indent=2)
+        json.dump(output, f, indent=2, cls=_NumpyEncoder)
 
     print(f"\nDone! Saved to output/cluster_analysis.json")
     print(f"  {len(audio_data)} samples, {best_k} clusters, 3 PCs (from z-scored descriptors)")

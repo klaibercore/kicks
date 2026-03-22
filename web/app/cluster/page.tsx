@@ -18,6 +18,7 @@ import { ClusterProfileCard } from "@/components/cluster/cluster-profile";
 import { SampleInspector } from "@/components/cluster/sample-inspector";
 import { DescriptorDistribution } from "@/components/cluster/descriptor-distribution";
 import { ColorModeSelector } from "@/components/cluster/color-mode-selector";
+import { EdaSection } from "@/components/cluster/eda-section";
 
 export default function ClusterPage() {
   const { data, loading, correlations, clusterProfiles, pcNames } =
@@ -86,10 +87,10 @@ export default function ClusterPage() {
   return (
     <div className="min-h-screen bg-background text-foreground">
       <header className="border-b border-border bg-background/90 backdrop-blur-xl sticky top-0 z-20">
-        <div className="max-w-6xl mx-auto px-3 sm:px-6 py-3 sm:py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-0">
+        <div className="max-w-[1600px] mx-auto px-3 sm:px-6 py-3 sm:py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-0">
           <div>
             <h1 className="text-lg sm:text-xl font-bold tracking-tight bg-gradient-to-r from-foreground to-muted-foreground bg-clip-text text-transparent">
-              PCA Analysis
+              Corpus Analysis
             </h1>
             <div className="flex flex-wrap items-center gap-1.5 mt-1">
               <span className="text-[10px] sm:text-[11px] font-mono text-muted-foreground bg-muted px-1.5 sm:px-2 py-0.5 rounded-md">
@@ -171,7 +172,9 @@ export default function ClusterPage() {
           </Canvas>
         </div>
       ) : (
-        <main className="max-w-6xl mx-auto px-3 sm:px-6 py-5 sm:py-8 space-y-6 sm:space-y-8">
+        <main className="max-w-[1600px] mx-auto px-3 sm:px-6 py-5 sm:py-8 space-y-6 sm:space-y-8">
+          <EdaSection data={data} />
+
           <section>
             <VarianceBar
               variance={data.pca_variance_explained}
@@ -216,7 +219,7 @@ export default function ClusterPage() {
                 setColorMode={setColorMode}
               />
             </div>
-            <div className="grid grid-cols-1 gap-3 sm:gap-4">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 sm:gap-4">
               <ScatterPlot
                 samples={data.samples}
                 xKey="pc1"
@@ -304,7 +307,7 @@ export default function ClusterPage() {
           </section>
 
           <div className="pt-6 pb-10 text-center text-[11px] text-muted-foreground/60">
-            Kick Drum PCA Analysis
+            Kick Drum Corpus Analysis
           </div>
         </main>
       )}

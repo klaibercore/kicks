@@ -14,6 +14,7 @@ export interface Sample {
     decay: number;
   };
   probs: number[];
+  duration_ms?: number;
 }
 
 export interface ClusterProfile {
@@ -31,14 +32,23 @@ export interface PCName {
   correlation: number;
 }
 
+export interface CorpusMeta {
+  sample_rate: number;
+  audio_length_ms: number;
+  n_total: number;
+  data_dir: string;
+}
+
 export interface ClusterData {
   pca_variance_explained: number[];
   pca_source?: string;
   n_clusters: number;
+  corpus?: CorpusMeta;
   samples: Sample[];
   pc_names?: PCName[];
   pca_loadings?: Record<string, Record<string, number>>;
   pc_descriptor_correlations?: Record<string, Record<string, number>>;
+  descriptor_correlations?: Record<string, Record<string, number>>;
   cluster_profiles?: Record<string, ClusterProfile>;
   descriptor_stats?: Record<
     string,
