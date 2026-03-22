@@ -43,7 +43,7 @@ function SummaryCards({ data }: { data: ClusterData }) {
 
   return (
     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-      <StatCard label="Samples" value={data.samples.length.toLocaleString()} sub={data.corpus ? `of ${data.corpus.n_total} total` : undefined} />
+      <StatCard label="Samples" value={data.samples.length.toLocaleString()} sub={data.corpus ? `of ${data.corpus.n_total.toLocaleString()} total` : undefined} />
       <StatCard label="Total Duration" value={formatDuration(totalMs)} sub={durations.length > 0 ? `avg ${formatDuration(avgMs)}` : undefined} />
       <StatCard label="Clusters" value={String(data.n_clusters)} sub={`BIC-selected`} />
       <StatCard label="PCA Variance" value={`${(totalVar * 100).toFixed(1)}%`} sub={`${data.pca_variance_explained.length} components`} />
