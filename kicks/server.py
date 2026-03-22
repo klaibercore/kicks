@@ -316,3 +316,26 @@ async def generate(
     buf.seek(0)
 
     return StreamingResponse(buf, media_type="audio/wav")
+
+
+@app.get("/spectrogram")
+async def spectrogram_data(
+    pc1: float = Query(0.5),
+    pc2: float = Query(0.5),
+    pc3: float = Query(0.5),
+    pc4: float = Query(0.5),
+):
+    pc_values = []
+    for i, raw in enumerate([pc1, pc2, pc3, pc4]):
+        val = _state.pc_mins[i] + raw * (_state.pc_maxs[i] - _state.pc_mins[i])
+        val = max(_state.pc_mins[i], min(_state.pc_maxs[i], val))
+        pc_values.append(val)
+
+    z_np = _state.pca.inverse_transform([pc_values])
+    z = torch.tensor(z_np, dtype=torch.float32).to(_state.device)
+
+    with torch.no_grad():
+        spec = _state.model.decode(z)  # (1, 1, 128, 256), values in [0, 1]
+
+    data = spec.squeeze().cpu().numpy().tolist()  # 128 rows × 256 cols
+    return {"data": data}

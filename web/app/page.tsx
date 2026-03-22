@@ -4,6 +4,8 @@ import { Slider } from "@/components/ui/slider";
 import { SLIDER_COLORS } from "@/types/synth";
 import { WaveBackground } from "@/components/synth/wave-background";
 import { WaveformVis } from "@/components/synth/waveform-vis";
+import { SpectrogramVis } from "@/components/synth/spectrogram-vis";
+import { WaveformViewerVis } from "@/components/synth/waveform-viewer";
 import { useSynth } from "@/hooks/use-synth";
 
 export default function Home() {
@@ -12,6 +14,8 @@ export default function Home() {
     values,
     status,
     playerRef,
+    spectrogram,
+    waveformData,
     handleSliderChange,
     handleGenerate,
     randomize,
@@ -23,7 +27,7 @@ export default function Home() {
       <WaveBackground />
 
       <div className="relative z-10 min-h-screen flex flex-col items-center justify-center p-6 sm:p-8">
-        <div className="w-full max-w-lg">
+        <div className="w-full max-w-4xl">
           {/* Header */}
           <div className="mb-10 text-center">
             <h1 className="text-5xl sm:text-6xl font-black tracking-tighter mb-3 bg-gradient-to-r from-violet-400 via-pink-400 to-emerald-400 bg-clip-text text-transparent">
@@ -35,8 +39,15 @@ export default function Home() {
             </p>
           </div>
 
+          {/* 3-column layout: spectrogram | card | waveform */}
+          <div className="flex gap-4 items-stretch">
+            {/* Left: pre-BigVGAN spectrogram */}
+            <div className="hidden sm:flex flex-none w-28 rounded-2xl border border-white/[0.08] bg-white/[0.03] backdrop-blur-xl overflow-hidden shadow-2xl shadow-violet-500/5">
+              <SpectrogramVis spectrogram={spectrogram} />
+            </div>
+
           {/* Main Card */}
-          <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] backdrop-blur-xl p-6 sm:p-8 space-y-7 shadow-2xl shadow-violet-500/5">
+          <div className="flex-1 min-w-0 rounded-2xl border border-white/[0.08] bg-white/[0.03] backdrop-blur-xl p-6 sm:p-8 space-y-7 shadow-2xl shadow-violet-500/5">
             {/* Sliders */}
             <div className="space-y-5">
               {sliders.map((s, i) => {
@@ -131,6 +142,12 @@ export default function Home() {
               )}
             </div>
           </div>
+
+            {/* Right: post-BigVGAN waveform */}
+            <div className="hidden sm:flex flex-none w-28 rounded-2xl border border-white/[0.08] bg-white/[0.03] backdrop-blur-xl overflow-hidden shadow-2xl shadow-violet-500/5">
+              <WaveformViewerVis waveformData={waveformData} />
+            </div>
+          </div>{/* end 3-column */}
 
           {/* Footer */}
           <div className="mt-8 text-center">
