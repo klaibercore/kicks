@@ -193,11 +193,11 @@ def run_cluster(data: str = "data/kicks", n_samples: int | None = None) -> None:
         audios = []
         for idx in cluster_indices:
             sample_path = dataset.paths[subset_indices[idx]]
-            data, sr = sf.read(sample_path, dtype="float32")
-            if data.ndim == 1:
-                audio = torch.from_numpy(data).unsqueeze(0)
+            raw, sr = sf.read(sample_path, dtype="float32")
+            if raw.ndim == 1:
+                audio = torch.from_numpy(raw).unsqueeze(0)
             else:
-                audio = torch.from_numpy(data.T)
+                audio = torch.from_numpy(raw.T)
             if audio.shape[0] > 1:
                 audio = audio.mean(dim=0, keepdim=True)
             if sr != SAMPLE_RATE:
