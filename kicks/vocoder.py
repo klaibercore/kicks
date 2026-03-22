@@ -1,5 +1,6 @@
 """BigVGAN neural vocoder for mel spectrogram to audio conversion."""
 
+import glob
 import os
 
 import torch
@@ -9,7 +10,7 @@ import bigvgan
 from .model import SAMPLE_RATE
 
 BIGVGAN_MODEL = "nvidia/bigvgan_v2_44khz_128band_256x"
-FINETUNED_PATH = "models/vocoder/best.pth"
+VOCODER_DIR = "models/vocoder"
 
 
 def _patch_bigvgan_from_pretrained():
@@ -37,10 +38,12 @@ def load_vocoder(device: torch.device) -> bigvgan.BigVGAN:
     """Load BigVGAN vocoder. Uses fine-tuned weights if available, otherwise pretrained."""
     model = bigvgan.BigVGAN.from_pretrained(BIGVGAN_MODEL, use_cuda_kernel=False)
 
-    if os.path.exists(FINETUNED_PATH):
-        checkpoint = torch.load(FINETUNED_PATH, map_location=device)
+    pth_files = sorted(glob.glob(os.path.join(VOCODER_DIR, "*.pth")))
+    if pth_files:
+        pth_path = pth_files[0]
+        checkpoint = torch.load(pth_path, map_location=device)
         model.load_state_dict(checkpoint["generator"])
-        print(f"Loaded fine-tuned vocoder (epoch {checkpoint['epoch']})")
+        print(f"Loaded fine-tuned vocoder from {pth_path} (epoch {checkpoint['epoch']})")
     else:
         print("Using pretrained BigVGAN (run `kicks fine-tune` to improve)")
 
