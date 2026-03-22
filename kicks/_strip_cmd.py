@@ -136,6 +136,56 @@ def _detect_kick_region(
     return (onset, end)
 
 
+def _is_loop(
+    audio: torch.Tensor,
+    sr: int,
+    min_lag_ms: float = 100.0,
+    acf_threshold: float = 0.3,
+    frame_ms: float = 10.0,
+) -> bool:
+    """Detect cyclical/looping content via energy-envelope autocorrelation.
+
+    A single kick decays monotonically — its autocorrelation falls off and
+    stays low.  A loop has periodic energy peaks, producing strong ACF peaks
+    at the loop period.
+
+    Args:
+        min_lag_ms: Ignore lags shorter than this (skips the kick body).
+        acf_threshold: Normalized ACF peak above this → loop.
+        frame_ms: RMS frame length for the energy envelope.
+    """
+    x = audio.numpy()
+    # Compute RMS energy envelope in short frames
+    frame_len = max(1, int(sr * frame_ms / 1000))
+    n_frames = len(x) // frame_len
+    if n_frames < 4:
+        return False
+    frames = x[: n_frames * frame_len].reshape(n_frames, frame_len)
+    envelope = np.sqrt(np.mean(frames ** 2, axis=1))
+
+    # Zero-center for autocorrelation
+    envelope = envelope - envelope.mean()
+    norm = np.dot(envelope, envelope)
+    if norm < 1e-10:
+        return False
+
+    # Normalized autocorrelation via FFT (much faster than np.correlate for long signals)
+    n_fft = 1
+    while n_fft < 2 * n_frames:
+        n_fft *= 2
+    spec = np.fft.rfft(envelope, n=n_fft)
+    acf = np.fft.irfft(spec * np.conj(spec))[:n_frames]
+    acf = acf / norm
+
+    # Only look at lags past the kick body
+    min_lag_frames = max(1, int(min_lag_ms / frame_ms))
+    if min_lag_frames >= n_frames:
+        return False
+    acf_tail = acf[min_lag_frames:]
+
+    return bool(np.max(acf_tail) > acf_threshold)
+
+
 def _apply_fade_and_zero(audio: np.ndarray, end: int, fade_samples: int) -> np.ndarray:
     """Apply cosine fade-out at `end` and zero everything after."""
     out = audio.copy()
@@ -155,6 +205,7 @@ def strip_file(
     max_duration_ms: float = 1200.0,
     fade_ms: float = 10.0,
     dry_run: bool = False,
+    exclude_loops: bool = True,
 ) -> dict:
     """Process a single WAV file. Returns status dict."""
     audio, sr = _load_audio(path)
@@ -164,6 +215,10 @@ def strip_file(
     min_samples = int(sr * min_duration_ms / 1000)
     if n_samples <= min_samples:
         return {"path": path, "status": "skip_short", "duration_ms": n_samples / sr * 1000}
+
+    # Detect cyclical/loop content
+    if exclude_loops and _is_loop(audio, sr):
+        return {"path": path, "status": "loop", "duration_ms": n_samples / sr * 1000}
 
     region = _detect_kick_region(audio, sr, threshold, min_duration_ms, max_duration_ms)
     if region is None:
@@ -208,6 +263,7 @@ def run_strip(
     threshold: float = 0.01,
     fade_ms: float = 10.0,
     backup: bool = False,
+    exclude_loops: bool = True,
 ) -> None:
     """Strip non-kick content from all WAVs in a directory."""
     if not os.path.isdir(data):
@@ -232,8 +288,10 @@ def run_strip(
     mode = "DRY RUN" if dry_run else "STRIP"
     print(f"\n[{mode}] Processing {len(wav_files)} files in {data}/\n")
 
-    counts = {"stripped": 0, "skip_clean": 0, "skip_short": 0, "skip_no_kick": 0}
+    loops_dir = data.rstrip("/") + "_loops"
+    counts = {"stripped": 0, "skip_clean": 0, "skip_short": 0, "skip_no_kick": 0, "loop": 0}
     durations = []
+    loop_files: list[str] = []
 
     with Progress(
         TextColumn("[bold blue]{task.description}"),
@@ -252,18 +310,29 @@ def run_strip(
                 max_duration_ms=max_duration,
                 fade_ms=fade_ms,
                 dry_run=dry_run,
+                exclude_loops=exclude_loops,
             )
             counts[result["status"]] = counts.get(result["status"], 0) + 1
-            if result.get("duration_ms"):
+            if result["status"] == "loop":
+                loop_files.append(filename)
+            elif result["status"] in ("stripped", "skip_clean") and result.get("duration_ms"):
                 durations.append(result["duration_ms"])
             progress.update(task, advance=1)
 
+    # Move detected loops to reject directory
+    if loop_files and not dry_run:
+        os.makedirs(loops_dir, exist_ok=True)
+        for f in loop_files:
+            shutil.move(os.path.join(data, f), os.path.join(loops_dir, f))
+        print(f"\nMoved {len(loop_files)} loops to {loops_dir}/")
+
     # Summary
     print(f"\nResults:")
-    print(f"  Stripped:     {counts['stripped']}")
-    print(f"  Already clean: {counts['skip_clean']}")
-    print(f"  Too short:   {counts['skip_short']}")
-    print(f"  No kick:     {counts['skip_no_kick']}")
+    print(f"  Stripped:       {counts['stripped']}")
+    print(f"  Already clean:  {counts['skip_clean']}")
+    print(f"  Loops excluded: {counts['loop']}")
+    print(f"  Too short:      {counts['skip_short']}")
+    print(f"  No kick:        {counts['skip_no_kick']}")
 
     if durations:
         durations_arr = np.array(durations)

@@ -27,8 +27,9 @@ def select_n_clusters(latents: np.ndarray, max_k: int = 10) -> tuple[int, list[f
     max_k = min(max_k, max(2, len(latents) // 3))
     k_range = range(2, max_k + 1)
     bics = []
+    latents = latents.astype(np.float64)
     for k in k_range:
-        gmm = GaussianMixture(n_components=k, covariance_type="full", random_state=42, n_init=3)
+        gmm = GaussianMixture(n_components=k, covariance_type="full", random_state=42, n_init=3, reg_covar=1e-4)
         gmm.fit(latents)
         bics.append(gmm.bic(latents))
     best_k = list(k_range)[int(np.argmin(bics))]
@@ -39,8 +40,9 @@ def fit_gmm(
     latents: np.ndarray, n_clusters: int
 ) -> tuple[GaussianMixture, np.ndarray, np.ndarray]:
     """Fit GMM and return model, hard labels, and soft probabilities."""
+    latents = latents.astype(np.float64)
     gmm = GaussianMixture(
-        n_components=n_clusters, covariance_type="full", random_state=42, n_init=3
+        n_components=n_clusters, covariance_type="full", random_state=42, n_init=3, reg_covar=1e-4
     )
     gmm.fit(latents)
     labels = gmm.predict(latents)
@@ -83,8 +85,8 @@ def compute_descriptors(spec_tensor: torch.Tensor) -> dict[str, float]:
     # Compare transient (frames 0-3) to body (frames 3-30)
     transient_energy = spec[10:30, :3].mean()
     body_energy = spec[10:30, 3:30].mean()
-    punch = float(transient_energy / (body_energy + 1e-8))
-    punch = min(punch, 1.0)
+    ratio = transient_energy / (body_energy + 1e-8)
+    punch = float(np.clip(np.log(max(ratio, 1e-8)) / 2.0, 0.0, 1.0))
     
     # Click/transient: high frequency energy in first few frames
     # This is specifically what we want to measure - the initial transient

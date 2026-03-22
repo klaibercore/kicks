@@ -119,6 +119,7 @@ def strip(
     threshold: float = typer.Option(0.01, "--threshold", help="Decay threshold (fraction of peak)"),
     fade_ms: float = typer.Option(10.0, "--fade-ms", help="Fade-out length in ms"),
     backup: bool = typer.Option(False, "--backup", help="Copy originals to backup dir first"),
+    exclude_loops: bool = typer.Option(True, "--exclude-loops/--keep-loops", help="Detect and move full loops to reject dir"),
 ) -> None:
     """Strip non-kick content from drum loop WAVs."""
     from kicks._strip_cmd import run_strip
@@ -131,6 +132,7 @@ def strip(
         threshold=threshold,
         fade_ms=fade_ms,
         backup=backup,
+        exclude_loops=exclude_loops,
     )
 
 
