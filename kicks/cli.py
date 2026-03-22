@@ -110,6 +110,30 @@ def cluster(
     run_cluster(data=data, n_samples=samples if samples > 0 else None)
 
 
+@app.command()
+def strip(
+    data: str = typer.Option("data/kicks", "--data", "-d", help="Path to sample directory"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Analyze without modifying files"),
+    max_duration: float = typer.Option(1200.0, "--max-duration", help="Max kick duration in ms"),
+    min_duration: float = typer.Option(50.0, "--min-duration", help="Min kick duration in ms"),
+    threshold: float = typer.Option(0.01, "--threshold", help="Decay threshold (fraction of peak)"),
+    fade_ms: float = typer.Option(10.0, "--fade-ms", help="Fade-out length in ms"),
+    backup: bool = typer.Option(False, "--backup", help="Copy originals to backup dir first"),
+) -> None:
+    """Strip non-kick content from drum loop WAVs."""
+    from kicks._strip_cmd import run_strip
+
+    run_strip(
+        data=data,
+        dry_run=dry_run,
+        max_duration=max_duration,
+        min_duration=min_duration,
+        threshold=threshold,
+        fade_ms=fade_ms,
+        backup=backup,
+    )
+
+
 @app.command("fine-tune")
 def fine_tune(
     data: str = typer.Option("data/kicks", "--data", "-d", help="Path to training data directory"),

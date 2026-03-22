@@ -1,0 +1,274 @@
+"""Strip non-kick content from drum loop WAVs.
+
+Detects the kick hit via low-frequency envelope analysis, finds its natural
+decay endpoint, then fades out and zeros everything after — leaving only
+the isolated kick.
+"""
+
+import os
+import shutil
+
+import numpy as np
+import soundfile as sf
+import torch
+import torchaudio
+import torchaudio.functional as F
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    TextColumn,
+    TimeRemainingColumn,
+)
+
+TARGET_SR = 44100
+
+
+def _load_audio(path: str) -> tuple[torch.Tensor, int]:
+    """Load WAV as mono float32 tensor at TARGET_SR. Returns (audio_1d, sr)."""
+    data, sr = sf.read(path, dtype="float32")
+    if data.ndim == 1:
+        audio = torch.from_numpy(data).unsqueeze(0)
+    else:
+        audio = torch.from_numpy(data.T)
+    if audio.shape[0] > 1:
+        audio = torch.mean(audio, dim=0, keepdim=True)
+    if sr != TARGET_SR:
+        audio = torchaudio.transforms.Resample(sr, TARGET_SR)(audio)
+    return audio.squeeze(0), TARGET_SR
+
+
+def _smooth_envelope(
+    audio: torch.Tensor, sr: int, cutoff: float, order: int = 2, smooth_ms: float = 5.0
+) -> np.ndarray:
+    """Cascaded biquad filter -> abs -> moving-average smoothing.
+
+    Args:
+        audio: 1-D tensor.
+        cutoff: Filter cutoff in Hz.
+        order: Number of cascaded biquad passes.
+        smooth_ms: Moving-average window in milliseconds.
+    """
+    x = audio.unsqueeze(0)  # (1, T) for biquad
+    for _ in range(order):
+        x = F.lowpass_biquad(x, sr, cutoff_freq=cutoff)
+    env = x.squeeze(0).abs().numpy()
+    # Moving average smoothing
+    win = max(1, int(sr * smooth_ms / 1000))
+    kernel = np.ones(win) / win
+    env = np.convolve(env, kernel, mode="same")
+    return env
+
+
+def _hf_envelope(audio: torch.Tensor, sr: int, cutoff: float = 2000.0, smooth_ms: float = 5.0) -> np.ndarray:
+    """High-frequency envelope for detecting hi-hat/snare onsets."""
+    x = audio.unsqueeze(0)
+    for _ in range(2):
+        x = F.highpass_biquad(x, sr, cutoff_freq=cutoff)
+    env = x.squeeze(0).abs().numpy()
+    win = max(1, int(sr * smooth_ms / 1000))
+    kernel = np.ones(win) / win
+    env = np.convolve(env, kernel, mode="same")
+    return env
+
+
+def _detect_kick_region(
+    audio: torch.Tensor,
+    sr: int,
+    threshold: float = 0.01,
+    min_duration_ms: float = 50.0,
+    max_duration_ms: float = 1200.0,
+) -> tuple[int, int] | None:
+    """Detect kick onset and decay endpoint.
+
+    Returns (start_sample, end_sample) or None if no kick found.
+    """
+    lf_env = _smooth_envelope(audio, sr, cutoff=200.0)
+    peak_idx = int(np.argmax(lf_env))
+    peak_val = lf_env[peak_idx]
+
+    if peak_val < 1e-6:
+        return None  # No meaningful LF content
+
+    # --- Onset: walk backward from peak to 5% of peak ---
+    onset_thresh = 0.05 * peak_val
+    onset = peak_idx
+    while onset > 0 and lf_env[onset] > onset_thresh:
+        onset -= 1
+    onset = max(0, onset - 64)  # 64-sample guard
+
+    # --- Decay end (method 1): LF threshold ---
+    lf_end = peak_idx
+    while lf_end < len(lf_env) - 1 and lf_env[lf_end] > threshold * peak_val:
+        lf_end += 1
+
+    # --- Decay end (method 2): HF onset detection ---
+    hf_env = _hf_envelope(audio, sr)
+    # Skip the kick's own click transient (~30ms after peak)
+    skip_samples = int(sr * 0.030)
+    search_start = peak_idx + skip_samples
+    hf_end = len(audio)
+
+    if search_start < len(hf_env):
+        # Look for a sudden HF spike (hi-hat/snare)
+        hf_after = hf_env[search_start:]
+        if len(hf_after) > 0:
+            hf_baseline = np.median(hf_after[:max(1, len(hf_after) // 4)])
+            if hf_baseline > 0:
+                # Spike = 5x the baseline
+                spike_indices = np.where(hf_after > 5.0 * hf_baseline)[0]
+                if len(spike_indices) > 0:
+                    hf_end = search_start + int(spike_indices[0])
+
+    # Take the earlier of the two endpoints
+    end = min(lf_end, hf_end)
+
+    # Clamp duration
+    min_samples = int(sr * min_duration_ms / 1000)
+    max_samples = int(sr * max_duration_ms / 1000)
+    duration = end - onset
+    if duration < min_samples:
+        end = onset + min_samples
+    elif duration > max_samples:
+        end = onset + max_samples
+
+    end = min(end, len(audio))
+    return (onset, end)
+
+
+def _apply_fade_and_zero(audio: np.ndarray, end: int, fade_samples: int) -> np.ndarray:
+    """Apply cosine fade-out at `end` and zero everything after."""
+    out = audio.copy()
+    fade_start = max(0, end - fade_samples)
+    fade_len = end - fade_start
+    if fade_len > 0:
+        fade = 0.5 * (1.0 + np.cos(np.linspace(0, np.pi, fade_len)))
+        out[fade_start:end] *= fade
+    out[end:] = 0.0
+    return out
+
+
+def strip_file(
+    path: str,
+    threshold: float = 0.01,
+    min_duration_ms: float = 50.0,
+    max_duration_ms: float = 1200.0,
+    fade_ms: float = 10.0,
+    dry_run: bool = False,
+) -> dict:
+    """Process a single WAV file. Returns status dict."""
+    audio, sr = _load_audio(path)
+    n_samples = len(audio)
+
+    # Too short to process
+    min_samples = int(sr * min_duration_ms / 1000)
+    if n_samples <= min_samples:
+        return {"path": path, "status": "skip_short", "duration_ms": n_samples / sr * 1000}
+
+    region = _detect_kick_region(audio, sr, threshold, min_duration_ms, max_duration_ms)
+    if region is None:
+        return {"path": path, "status": "skip_no_kick", "duration_ms": n_samples / sr * 1000}
+
+    onset, end = region
+
+    # Check if already clean: post-endpoint audio is near-silent
+    if end < n_samples:
+        tail_rms = np.sqrt(np.mean(audio.numpy()[end:] ** 2))
+        peak_rms = np.sqrt(np.mean(audio.numpy()[onset:end] ** 2))
+        if peak_rms > 0 and tail_rms / peak_rms < 0.01:
+            return {
+                "path": path,
+                "status": "skip_clean",
+                "duration_ms": (end - onset) / sr * 1000,
+            }
+
+    kick_duration_ms = (end - onset) / sr * 1000
+    fade_samples = int(sr * fade_ms / 1000)
+
+    if not dry_run:
+        audio_np = audio.numpy()
+        processed = _apply_fade_and_zero(audio_np, end, fade_samples)
+        # Keep from onset onward (preserve any silence before onset as leading zeros)
+        sf.write(path, processed, sr, subtype="FLOAT")
+
+    return {
+        "path": path,
+        "status": "stripped",
+        "duration_ms": kick_duration_ms,
+        "onset": onset,
+        "end": end,
+    }
+
+
+def run_strip(
+    data: str = "data/kicks",
+    dry_run: bool = False,
+    max_duration: float = 1200.0,
+    min_duration: float = 50.0,
+    threshold: float = 0.01,
+    fade_ms: float = 10.0,
+    backup: bool = False,
+) -> None:
+    """Strip non-kick content from all WAVs in a directory."""
+    if not os.path.isdir(data):
+        print(f"Directory not found: {data}")
+        return
+
+    wav_files = sorted(f for f in os.listdir(data) if f.lower().endswith(".wav"))
+    if not wav_files:
+        print(f"No WAV files found in {data}")
+        return
+
+    if backup:
+        backup_dir = data.rstrip("/") + "_backup"
+        if not os.path.exists(backup_dir):
+            os.makedirs(backup_dir)
+            for f in wav_files:
+                shutil.copy2(os.path.join(data, f), os.path.join(backup_dir, f))
+            print(f"Backed up {len(wav_files)} files to {backup_dir}/")
+        else:
+            print(f"Backup directory already exists: {backup_dir}/ — skipping backup")
+
+    mode = "DRY RUN" if dry_run else "STRIP"
+    print(f"\n[{mode}] Processing {len(wav_files)} files in {data}/\n")
+
+    counts = {"stripped": 0, "skip_clean": 0, "skip_short": 0, "skip_no_kick": 0}
+    durations = []
+
+    with Progress(
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeRemainingColumn(),
+    ) as progress:
+        task = progress.add_task("Stripping kicks", total=len(wav_files))
+
+        for filename in wav_files:
+            path = os.path.join(data, filename)
+            result = strip_file(
+                path,
+                threshold=threshold,
+                min_duration_ms=min_duration,
+                max_duration_ms=max_duration,
+                fade_ms=fade_ms,
+                dry_run=dry_run,
+            )
+            counts[result["status"]] = counts.get(result["status"], 0) + 1
+            if result.get("duration_ms"):
+                durations.append(result["duration_ms"])
+            progress.update(task, advance=1)
+
+    # Summary
+    print(f"\nResults:")
+    print(f"  Stripped:     {counts['stripped']}")
+    print(f"  Already clean: {counts['skip_clean']}")
+    print(f"  Too short:   {counts['skip_short']}")
+    print(f"  No kick:     {counts['skip_no_kick']}")
+
+    if durations:
+        durations_arr = np.array(durations)
+        print(f"\nKick durations (ms):")
+        print(f"  Min:    {durations_arr.min():.0f}")
+        print(f"  Median: {np.median(durations_arr):.0f}")
+        print(f"  Max:    {durations_arr.max():.0f}")
+        print(f"  Mean:   {durations_arr.mean():.0f}")
