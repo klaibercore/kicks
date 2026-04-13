@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 import numpy as np
 import torch
 import soundfile as sf
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from sklearn.decomposition import PCA
@@ -26,11 +26,14 @@ class _State:
     dataset: KickDataset
     model: VAE
     vocoder: object
+    vocoder_type: str
     pca: PCA
     pc_projected: np.ndarray
     pc_names: list[str]
     pc_mins: list[float]
     pc_maxs: list[float]
+    decay_compensation: np.ndarray | None  # per-PC ratios to cancel decay cross-talk
+    decay_idx: int | None                  # index of the Decay PC
 
 
 _state = _State()
@@ -47,7 +50,8 @@ async def _lifespan(app: FastAPI):
 
     _state.model, _ = load_vae_from_checkpoint(BEST_CHECKPOINT, _state.device)
 
-    _state.vocoder = load_vocoder(_state.device)
+    _state.vocoder_type = os.environ.get("KICKS_VOCODER", "bigvgan")
+    _state.vocoder = load_vocoder(_state.device, vocoder_type=_state.vocoder_type)
 
     latents, spectrograms = extract_latents(_state.model, dataloader, _state.device)
 
@@ -99,6 +103,36 @@ async def _lifespan(app: FastAPI):
 
     _state.pc_mins = [float(np.percentile(_state.pc_projected[:, i], 2)) for i in range(N_PCS)]
     _state.pc_maxs = [float(np.percentile(_state.pc_projected[:, i], 98)) for i in range(N_PCS)]
+
+    # Decay decorrelation: compute per-PC compensation ratios so that
+    # non-Decay sliders don't change the perceived sample length.
+    _state.decay_idx = None
+    _state.decay_compensation = None
+    for i, name in enumerate(_state.pc_names):
+        if name == "Decay":
+            _state.decay_idx = i
+            break
+
+    if _state.decay_idx is not None:
+        decay_vals = desc_arrays["decay"]
+        d_mean, d_std = decay_vals.mean(), decay_vals.std()
+        # Regression coefficient of each PC on the decay descriptor
+        betas = np.zeros(N_PCS)
+        for i in range(N_PCS):
+            pc_vals = _state.pc_projected[:, i]
+            pc_std = pc_vals.std()
+            if pc_std > 0 and d_std > 0:
+                r = float(np.corrcoef(pc_vals, decay_vals)[0, 1])
+                betas[i] = r * d_std / pc_std
+        decay_beta = betas[_state.decay_idx]
+        if abs(decay_beta) > 1e-8:
+            # ratio[i] = how much Decay PC must shift per unit of PC_i to cancel its decay effect
+            ratios = betas / decay_beta
+            ratios[_state.decay_idx] = 0.0  # Decay slider keeps its own effect
+            _state.decay_compensation = ratios
+            print(f"Decay decorrelation enabled (ratios: {ratios.round(3)})")
+        else:
+            print("Decay decorrelation skipped (Decay PC has negligible decay correlation)")
 
     print(f"PCA variance explained: {_state.pca.explained_variance_ratio_}")
     for i in range(N_PCS):
@@ -288,21 +322,34 @@ async def config():
             "default": 0.5,
             "step": 0.01,
         })
-    return {"sliders": sliders}
+    return {"sliders": sliders, "vocoder": _state.vocoder_type}
 
 
-@app.get("/generate")
-async def generate(
-    pc1: float = Query(0.5),
-    pc2: float = Query(0.5),
-    pc3: float = Query(0.5),
-    pc4: float = Query(0.5),
-):
+def _parse_pc_values(request: Request) -> list[float]:
+    """Map slider positions [0,1] to PC-space values with decay decorrelation."""
     pc_values = []
-    for i, raw in enumerate([pc1, pc2, pc3, pc4]):
+    for i in range(N_PCS):
+        raw = float(request.query_params.get(f"pc{i + 1}", "0.5"))
         val = _state.pc_mins[i] + raw * (_state.pc_maxs[i] - _state.pc_mins[i])
         val = max(_state.pc_mins[i], min(_state.pc_maxs[i], val))
         pc_values.append(val)
+
+    # Compensate for decay cross-talk: adjust the Decay PC to cancel the
+    # decay effect introduced by other PCs deviating from their midpoints.
+    if _state.decay_compensation is not None and _state.decay_idx is not None:
+        di = _state.decay_idx
+        for i in range(N_PCS):
+            if i == di:
+                continue
+            center = (_state.pc_mins[i] + _state.pc_maxs[i]) / 2.0
+            pc_values[di] -= _state.decay_compensation[i] * (pc_values[i] - center)
+
+    return pc_values
+
+
+@app.get("/generate")
+async def generate(request: Request):
+    pc_values = _parse_pc_values(request)
 
     z_np = _state.pca.inverse_transform([pc_values])
     z = torch.tensor(z_np, dtype=torch.float32).to(_state.device)
@@ -319,17 +366,8 @@ async def generate(
 
 
 @app.get("/spectrogram")
-async def spectrogram_data(
-    pc1: float = Query(0.5),
-    pc2: float = Query(0.5),
-    pc3: float = Query(0.5),
-    pc4: float = Query(0.5),
-):
-    pc_values = []
-    for i, raw in enumerate([pc1, pc2, pc3, pc4]):
-        val = _state.pc_mins[i] + raw * (_state.pc_maxs[i] - _state.pc_mins[i])
-        val = max(_state.pc_mins[i], min(_state.pc_maxs[i], val))
-        pc_values.append(val)
+async def spectrogram_data(request: Request):
+    pc_values = _parse_pc_values(request)
 
     z_np = _state.pca.inverse_transform([pc_values])
     z = torch.tensor(z_np, dtype=torch.float32).to(_state.device)

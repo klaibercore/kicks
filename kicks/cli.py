@@ -79,6 +79,7 @@ def serve(
     data: str = typer.Option("data/kicks", "--data", "-d", help="Path to dataset directory"),
     port: int = typer.Option(8080, "--port", "-p", help="API port"),
     host: str = typer.Option("0.0.0.0", "--host", help="API host"),
+    griffin_lim: bool = typer.Option(False, "--griffin-lim", help="Use Griffin-LIM vocoder instead of BigVGAN (lower quality, no GPU needed)"),
 ) -> None:
     """Start the FastAPI synthesis server."""
     import os
@@ -86,6 +87,8 @@ def serve(
     import uvicorn
 
     os.environ.setdefault("KICKS_DATA_DIR", data)
+    if griffin_lim:
+        os.environ["KICKS_VOCODER"] = "griffinlim"
     uvicorn.run("kicks.server:app", host=host, port=port, reload=False)
 
 

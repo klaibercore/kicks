@@ -13,7 +13,7 @@ BEST_CHECKPOINT = os.path.join(MODEL_DIR, "vae_best.pth")
 
 # Model defaults
 LATENT_DIM = 128
-N_PCS = 4
+N_PCS = 5
 
 
 def load_vae_from_checkpoint(

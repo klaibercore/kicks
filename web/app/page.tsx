@@ -20,6 +20,7 @@ export default function Home() {
     spectrogram,
     waveformData,
     kickBuffer,
+    vocoder,
     handleSliderChange,
     handleGenerate,
     randomize,
@@ -40,6 +41,11 @@ export default function Home() {
             Neural kick drum synthesizer powered by a variational autoencoder.
             Shape your sound with four latent dimensions.
           </p>
+          {vocoder === "griffinlim" && (
+            <div className="mt-4 mx-auto max-w-md px-4 py-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-300 text-xs sm:text-sm leading-relaxed">
+              Griffin-LIM vocoder is active. Sound quality may be lower than with the default BigVGAN neural vocoder.
+            </div>
+          )}
         </div>
 
         {/* 3-column layout: spectrogram | card | waveform — full browser width */}

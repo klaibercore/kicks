@@ -68,7 +68,8 @@ def compute_descriptors(spec_tensor: torch.Tensor) -> dict[str, float]:
     - Frames 30+:    Decay tail
     
     Excludes transient (first 3 frames) from most calculations for stability.
-    Fits exponential decay: E(t) = A * exp(-tau * t) where tau is the decay rate.
+    Decay uses a direct sub-bass sustain ratio (tail vs body energy) for
+    maximum correlation with the VAE latent space.
     """
     import numpy as np
     
@@ -97,41 +98,19 @@ def compute_descriptors(spec_tensor: torch.Tensor) -> dict[str, float]:
     low_energy = spec[:30, 3:].mean()
     bright = float(high_energy / (low_energy + high_energy + 1e-8))
     
-    # Decay: fit exponential decay to energy envelope
-    # Energy over time: sum across all frequency bands per frame
-    energy = spec.mean(axis=0)  # (256,)
-    energy = energy[3:]  # Exclude transient
-    
-    # Normalize energy for fitting
-    energy_norm = energy / (energy.max() + 1e-8)
-    energy_norm = np.clip(energy_norm, 1e-6, 1.0)
-    
-    # Fit exponential: E(t) = A * exp(-tau * t)
-    # Linearize: ln(E) = ln(A) - tau * t
-    # Use least squares on log-transformed data
-    t = np.arange(len(energy_norm))
-    log_energy = np.log(energy_norm + 1e-8)
-    
-    # Simple linear regression on log-transformed data
-    # ln(E) = b - tau * t  =>  tau = (mean(t)*mean(lnE) - sum(t*lnE)) / (mean(t)^2 - mean(t^2))
-    t_mean = t.mean()
-    log_mean = log_energy.mean()
-    numerator = np.sum((t - t_mean) * (log_energy - log_mean))
-    denominator = np.sum((t - t_mean) ** 2)
-    
-    if denominator > 1e-8:
-        tau = -numerator / denominator  # Decay rate
-    else:
-        tau = 0.0
-    
-    # Normalize tau to 0-1 range (typical values: 0.01-0.5 for kicks)
-    # Higher tau = faster decay (short tail), Lower tau = slower decay (long tail)
-    tau_normalized = float(np.clip(tau / 0.3, 0, 1))
-    
+    # Decay: direct sub-bass sustain ratio — measures the spectrogram
+    # exactly as the VAE sees it for maximum latent-space correlation.
+    # Compares sub energy in the tail (frames 120+, ~700ms+) to
+    # body (frames 3-60, ~17-348ms). Square root spreads the
+    # distribution aggressively so decay dominates PCA.
+    sub_body = spec[:20, 3:60].mean()
+    sub_tail = spec[:20, 120:].mean()
+    decay = float(np.clip(np.sqrt(sub_tail / (sub_body + 1e-8)), 0, 1))
+
     return {
         "sub": float(sub),
         "punch": float(punch),
         "click": float(click),
         "bright": float(bright),
-        "decay": tau_normalized,
+        "decay": decay,
     }

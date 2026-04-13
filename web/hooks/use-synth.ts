@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { SliderConfig } from "@/types/synth";
+import type { SliderConfig, VocoderType } from "@/types/synth";
 
 const API = "/api";
 
@@ -12,6 +12,7 @@ export function useSynth() {
   const [spectrogram, setSpectrogram] = useState<number[][] | null>(null);
   const [waveformData, setWaveformData] = useState<number[] | null>(null);
   const [kickBuffer, setKickBuffer] = useState<AudioBuffer | null>(null);
+  const [vocoder, setVocoder] = useState<VocoderType>("bigvgan");
   const playerRef = useRef<HTMLAudioElement>(null);
   const blobUrlRef = useRef<string | null>(null);
 
@@ -21,6 +22,7 @@ export function useSynth() {
       .then((data) => {
         setSliders(data.sliders);
         setValues(data.sliders.map((s: SliderConfig) => s.default));
+        if (data.vocoder) setVocoder(data.vocoder);
         setStatus("");
       })
       .catch(() => setStatus("Cannot connect to backend"));
@@ -108,6 +110,7 @@ export function useSynth() {
     spectrogram,
     waveformData,
     kickBuffer,
+    vocoder,
     handleSliderChange,
     handleGenerate,
     randomize,
