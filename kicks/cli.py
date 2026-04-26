@@ -13,8 +13,8 @@ app = typer.Typer(
 def train(
     data: str = typer.Option("data/kicks", "--data", "-d", help="Path to training data directory"),
     epochs: int = typer.Option(200, "--epochs", "-e", help="Number of training epochs"),
-    latent_dim: int = typer.Option(128, "--latent-dim", help="VAE latent dimension"),
-    beta: float = typer.Option(1.0, "--beta", help="KL beta weight"),
+    latent_dim: int = typer.Option(32, "--latent-dim", help="VAE latent dimension"),
+    beta: float = typer.Option(0.3, "--beta", help="KL beta weight (capped in cyclical annealing)"),
 ) -> None:
     """Train the kick drum VAE."""
     import os

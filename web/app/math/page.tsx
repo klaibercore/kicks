@@ -540,35 +540,31 @@ export default function MathPage() {
             "\\text{Bright} = \\frac{\\displaystyle\\sum_{f=50}^{127} \\sum_{t=3}^{T-1} \\hat{S}_{f,t}}{\\displaystyle\\sum_{f=0}^{29} \\sum_{t=3}^{T-1} \\hat{S}_{f,t} \\;+\\; \\sum_{f=50}^{127} \\sum_{t=3}^{T-1} \\hat{S}_{f,t} \\;+\\; \\epsilon}"
           }</Eq>
 
-          <p className="font-medium mt-2">Decay rate (exponential fit)</p>
+          <p className="font-medium mt-2">Decay (broadband early-to-late ratio)</p>
           <p className="text-muted-foreground text-sm mb-2">
-            The energy envelope is the mean across frequency per frame. An
-            exponential model is fit via log-linearisation and ordinary least
-            squares.
+            Compares the mean energy in the tail (~174-700 ms) to the body
+            (~17-174 ms) across a broad frequency range (bands 0-40,
+            ~20-350 Hz). The &ldquo;1 - ratio&rdquo; formulation spreads
+            naturally across [0, 1]: higher values mean tighter/faster
+            decay, lower values mean longer sustain.
           </p>
           <Eq>{
-            "E[t] = \\frac{1}{F} \\sum_{f=0}^{F-1} \\hat{S}_{f,t}, \\qquad t = 3, \\ldots, T{-}1"
+            "E_{\text{body}} = \frac{1}{40 \cdot 27} \sum_{f=0}^{39} \sum_{t=3}^{29} \hat{S}_{f,t}"
           }</Eq>
           <Eq>{
-            "\\text{Model:}\\quad E(t) = A \\, e^{-\\tau t} \\;\\;\\Longleftrightarrow\\;\\; \\ln E(t) = \\ln A - \\tau \\, t"
+            "E_{\text{tail}} = \frac{1}{40 \cdot 90} \sum_{f=0}^{39} \sum_{t=30}^{119} \hat{S}_{f,t}"
           }</Eq>
           <Eq>{
-            "\\tau = -\\frac{\\displaystyle\\sum_{t}(t - \\bar{t})(\\ln E_t - \\overline{\\ln E})}{\\displaystyle\\sum_{t}(t - \\bar{t})^2}"
-          }</Eq>
-          <Eq>{
-            "\\text{Decay} = \\operatorname{clamp}\\!\\left(\\frac{\\tau}{0.3},\\; 0,\\; 1\\right)"
+            "\text{Decay} = 1 - \operatorname{clip}\!\left(\frac{E_{\text{tail}}}{E_{\text{body}} + \epsilon},\; 0,\; 1\right)"
           }</Eq>
           <Legend
             rows={[
-              ["E[t]", "Vector", "Mean spectral energy at frame t", "[0, 1]"],
-              ["A", "Scalar", "Amplitude coefficient (fit)", "—"],
-              ["\\tau", "Scalar", "Exponential decay rate (fit)", "s^{-1}"],
-              ["\\bar{t}", "Scalar", "Mean of time indices", "—"],
-              ["\\overline{\\ln E}", "Scalar", "Mean of log-energies", "—"],
-              ["0.3", "Scalar", "Normalisation constant for \\tau", "—"],
+              ["\hat{S}_{f,t}", "Matrix", "Normalized log-mel spectrogram", "(128 \times 256)"],
+              ["f \in [0, 39]", "Index", "Mel bands 0-39 (\approx 20{-}350\text{ Hz})", "Sub through low-mids"],
+              ["t \in [3, 29]", "Index", "Body frames (\approx 17{-}174\text{ ms})", "Excludes transient"],
+              ["t \in [30, 119]", "Index", "Tail frames (\approx 174{-}700\text{ ms})", "Sustain tail"],
             ]}
           />
-        </Section>
 
         {/* ================================================================
             SECTION 8 — Pearson Correlation

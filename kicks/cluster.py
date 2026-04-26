@@ -68,8 +68,8 @@ def compute_descriptors(spec_tensor: torch.Tensor) -> dict[str, float]:
     - Frames 30+:    Decay tail
     
     Excludes transient (first 3 frames) from most calculations for stability.
-    Decay uses a direct sub-bass sustain ratio (tail vs body energy) for
-    maximum correlation with the VAE latent space.
+    Decay uses a broadband (bands 0-40) early-to-late energy ratio for a
+    robust measure of sustain that spreads naturally across the full range.
     """
     import numpy as np
     
@@ -98,14 +98,15 @@ def compute_descriptors(spec_tensor: torch.Tensor) -> dict[str, float]:
     low_energy = spec[:30, 3:].mean()
     bright = float(high_energy / (low_energy + high_energy + 1e-8))
     
-    # Decay: direct sub-bass sustain ratio — measures the spectrogram
-    # exactly as the VAE sees it for maximum latent-space correlation.
-    # Compares sub energy in the tail (frames 120+, ~700ms+) to
-    # body (frames 3-60, ~17-348ms). Square root spreads the
-    # distribution aggressively so decay dominates PCA.
-    sub_body = spec[:20, 3:60].mean()
-    sub_tail = spec[:20, 120:].mean()
-    decay = float(np.clip(np.sqrt(sub_tail / (sub_body + 1e-8)), 0, 1))
+    # Decay: broadband early-to-late energy ratio.
+    # Compares energy in the body (frames ~17-174ms, bands ~20-350Hz)
+    # to the tail (frames ~174-700ms). Higher = faster decay (acoustic
+    # thump), lower = longer sustain (808-style). The 1 - ratio
+    # formulation gives a natural spread across [0, 1].
+    early = spec[:40, 3:30].mean()   # bands 0-40, frames 3-30
+    late = spec[:40, 30:120].mean()  # bands 0-40, frames 30-120
+    ratio = np.clip(late / (early + 1e-8), 0, 1)
+    decay = float(1.0 - ratio)
 
     return {
         "sub": float(sub),

@@ -15,9 +15,13 @@ FMAX = None         # Nyquist
 
 
 class VAE(nn.Module):
-    """2D Conv VAE operating on log-mel spectrograms (1, 128, 256)."""
+    """2D Conv VAE operating on log-mel spectrograms (1, 128, 256).
 
-    def __init__(self, latent_dim: int = 128) -> None:
+    Reduced latent_dim=32 prevents posterior collapse while retaining
+    sufficient capacity for expressive kick drum synthesis.
+    """
+
+    def __init__(self, latent_dim: int = 32) -> None:
         super().__init__()
         self.latent_dim = latent_dim
 

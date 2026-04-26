@@ -57,12 +57,17 @@ def loss(
     mu: torch.Tensor,
     logvar: torch.Tensor,
     beta: float = 0.001,
+    free_bits: float = 0.5,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Beta-VAE loss: multi-resolution reconstruction + beta * KL.
+    """Beta-VAE loss: multi-resolution reconstruction + beta * KL with free bits.
+
+    Per-dimension KL is clamped to `free_bits` nats before summing, preventing
+    individual latent dimensions from collapsing to zero (posterior collapse).
 
     Returns (total_loss, recon_loss, kl) for separate logging.
     """
     batch_size = x.size(0)
     recon_loss = multi_resolution_loss(recon, x)
-    kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / batch_size
+    kl_per_dim = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).mean(0)
+    kl = kl_per_dim.clamp(min=free_bits).sum()
     return recon_loss + beta * kl, recon_loss, kl

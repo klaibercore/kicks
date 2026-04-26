@@ -12,7 +12,7 @@ OUTPUT_DIR = os.environ.get("KICKS_OUTPUT_DIR", "output")
 BEST_CHECKPOINT = os.path.join(MODEL_DIR, "vae_best.pth")
 
 # Model defaults
-LATENT_DIM = 128
+LATENT_DIM = 32
 N_PCS = 5
 
 
