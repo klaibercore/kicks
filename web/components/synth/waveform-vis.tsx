@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { useAudioContext } from "@/hooks/use-audio-context";
 
 export function WaveformVis({
   audioRef,
@@ -8,10 +9,10 @@ export function WaveformVis({
   audioRef: React.RefObject<HTMLAudioElement | null>;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const ctxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
   const animRef = useRef<number>(0);
+  const getCtx = useAudioContext();
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -19,14 +20,13 @@ export function WaveformVis({
     if (!canvas || !audio) return;
 
     function initAudio() {
-      if (ctxRef.current) return;
-      const actx = new AudioContext();
+      if (sourceRef.current) return;
+      const actx = getCtx();
       const analyser = actx.createAnalyser();
       analyser.fftSize = 256;
       const source = actx.createMediaElementSource(audio!);
       source.connect(analyser);
       analyser.connect(actx.destination);
-      ctxRef.current = actx;
       analyserRef.current = analyser;
       sourceRef.current = source;
     }
@@ -82,8 +82,16 @@ export function WaveformVis({
     return () => {
       audio.removeEventListener("play", initAudio);
       cancelAnimationFrame(animRef.current);
+      if (sourceRef.current) {
+        sourceRef.current.disconnect();
+        sourceRef.current = null;
+      }
+      if (analyserRef.current) {
+        analyserRef.current.disconnect();
+        analyserRef.current = null;
+      }
     };
-  }, [audioRef]);
+  }, [audioRef, getCtx]);
 
   return (
     <canvas

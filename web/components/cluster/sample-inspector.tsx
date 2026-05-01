@@ -1,8 +1,11 @@
 "use client";
 
+import { useRef } from "react";
 import type { Sample, PCName } from "@/types/cluster";
 import { DESCRIPTOR_KEYS, DESCRIPTOR_LABELS } from "@/types/cluster";
 import { CLUSTER_COLORS, PC_COLORS } from "@/lib/colors";
+
+let _gradientIdCounter = 0;
 
 export function SampleInspector({
   sample,
@@ -19,6 +22,9 @@ export function SampleInspector({
   onClose: () => void;
   pcNames: PCName[];
 }) {
+  const gradientIdRef = useRef(`inspectorWaveGradient_${++_gradientIdCounter}`);
+  const gradientId = gradientIdRef.current;
+
   return (
     <div className="rounded-2xl border border-border bg-gradient-to-b from-card/80 to-card/40 backdrop-blur-sm p-3 sm:p-5 space-y-3 sm:space-y-4 shadow-xl shadow-black/10 dark:shadow-black/20">
       <div className="flex items-start justify-between gap-2">
@@ -94,7 +100,7 @@ export function SampleInspector({
           >
             <defs>
               <linearGradient
-                id="inspectorWaveGradient"
+                id={gradientId}
                 x1="0%"
                 y1="0%"
                 x2="100%"
@@ -112,7 +118,7 @@ export function SampleInspector({
                 y1={32 - v * 26}
                 x2={i}
                 y2={32 + v * 26}
-                stroke="url(#inspectorWaveGradient)"
+                stroke={`url(#${gradientId})`}
                 strokeWidth="1.2"
                 opacity="0.8"
               />

@@ -81,10 +81,18 @@ class _KickAudioDataset(Dataset):
 
 def _find_latest_checkpoint(save_dir: str) -> str | None:
     """Find the most recent checkpoint_*.pth in save_dir."""
+    import re
     files = glob.glob(os.path.join(save_dir, "checkpoint_*.pth"))
     if not files:
         return None
-    return max(files, key=lambda f: int(f.split("_")[-1].split(".")[0]))
+    parsed = []
+    for f in files:
+        m = re.search(r"checkpoint_(\d+)\.pth", f)
+        if m:
+            parsed.append((int(m.group(1)), f))
+    if not parsed:
+        return None
+    return max(parsed, key=lambda x: x[0])[1]
 
 
 def finetune(
@@ -157,7 +165,7 @@ def finetune(
     best_mel_loss = float("inf")
     ckpt_path = _find_latest_checkpoint(save_dir)
     if ckpt_path:
-        ckpt = torch.load(ckpt_path, map_location=device)
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
         generator.load_state_dict(ckpt["generator"])
         mpd.load_state_dict(ckpt["mpd"])
         cqtd.load_state_dict(ckpt["cqtd"])

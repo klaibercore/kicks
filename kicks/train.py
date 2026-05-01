@@ -1,5 +1,7 @@
 """Training loop for the kick drum VAE."""
 
+import os
+
 import matplotlib.pyplot as plt
 import torch
 from rich.progress import Progress, TextColumn, BarColumn, TimeRemainingColumn, MofNCompleteColumn
@@ -80,9 +82,9 @@ def train(
                 l.backward()
                 optimizer.step()
 
-            avg_loss = sum(batch_loss) / len(batch_loss)
-            avg_recon = sum(batch_recon) / len(batch_recon)
-            avg_kl = sum(batch_kl) / len(batch_kl)
+            avg_loss = sum(batch_loss) / len(batch_loss) if batch_loss else 0.0
+            avg_recon = sum(batch_recon) / len(batch_recon) if batch_recon else 0.0
+            avg_kl = sum(batch_kl) / len(batch_kl) if batch_kl else 0.0
             epoch_loss.append(avg_loss)
             epoch_recon.append(avg_recon)
             epoch_kl.append(avg_kl)
@@ -99,7 +101,7 @@ def train(
                     recon, mu, logvar = model(data)
                     vl, _, _ = loss_fn(recon, data, mu, logvar, beta=current_beta)
                     val_losses.append(vl.item())
-            val_loss = sum(val_losses) / len(val_losses)
+            val_loss = sum(val_losses) / len(val_losses) if val_losses else 0.0
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -133,6 +135,6 @@ def train(
     ax3.set_xlabel("Epoch")
     ax3.grid()
     plt.tight_layout()
-    plt.show()
+    plt.savefig(os.path.join(save_dir, "loss_curves.png"))
 
     return {"loss": epoch_loss, "recon": epoch_recon, "kl": epoch_kl}

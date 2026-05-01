@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useAudioContext } from "./use-audio-context";
 
 export const NUM_STEPS = 16;
 
@@ -251,7 +252,6 @@ export function useSequencer(kickBuffer: AudioBuffer | null) {
   const [bpm, setBpm] = useState(120);
   const [midiStatus, setMidiStatus] = useState("No MIDI");
 
-  const ctxRef = useRef<AudioContext | null>(null);
   const timerRef = useRef<number | null>(null);
   const nextNoteTimeRef = useRef(0);
   const stepRef = useRef(0);
@@ -259,6 +259,7 @@ export function useSequencer(kickBuffer: AudioBuffer | null) {
   const kickBufRef = useRef(kickBuffer);
   const playingRef = useRef(false);
   const bpmRef = useRef(bpm);
+  const getCtx = useAudioContext();
 
   useEffect(() => {
     patternRef.current = pattern;
@@ -269,12 +270,6 @@ export function useSequencer(kickBuffer: AudioBuffer | null) {
   useEffect(() => {
     bpmRef.current = bpm;
   }, [bpm]);
-
-  const getCtx = useCallback(() => {
-    if (!ctxRef.current) ctxRef.current = new AudioContext();
-    if (ctxRef.current.state === "suspended") ctxRef.current.resume();
-    return ctxRef.current;
-  }, []);
 
   const triggerSound = useCallback(
     (trackIndex: number) => {

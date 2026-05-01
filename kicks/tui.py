@@ -19,7 +19,8 @@ from textual.reactive import reactive
 from textual.widgets import Button, Footer, Label, Static
 
 from kicks import KickDataset, KickDataloader, VAE
-from kicks.cluster import extract_latents, compute_descriptors
+from kicks.cluster import extract_latents
+from kicks.pca_analysis import analyze_latent_space
 from kicks.config import get_device, load_vae_from_checkpoint, BEST_CHECKPOINT, N_PCS
 from kicks.model import SAMPLE_RATE
 from kicks.vocoder import load_vocoder, spec_to_audio
@@ -573,71 +574,40 @@ class KicksApp(App):
     def _load_model(self) -> None:
         status = self.query_one("#status-line", StatusLine)
 
-        self.call_from_thread(status.update, "▸ LOADING DATASET...")
-        self._device = get_device()
-        self._dataset = KickDataset(self._data_dir)
-        dataloader = KickDataloader(self._dataset, batch_size=32, shuffle=False)
+        try:
+            self.call_from_thread(status.update, "▸ LOADING DATASET...")
+            self._device = get_device()
+            self._dataset = KickDataset(self._data_dir)
+            dataloader = KickDataloader(self._dataset, batch_size=32, shuffle=False)
 
-        self.call_from_thread(status.update, "▸ LOADING VAE...")
-        self._model, _ = load_vae_from_checkpoint(BEST_CHECKPOINT, self._device)
+            self.call_from_thread(status.update, "▸ LOADING VAE...")
+            self._model, _ = load_vae_from_checkpoint(BEST_CHECKPOINT, self._device)
 
-        self.call_from_thread(status.update, "▸ LOADING VOCODER...")
-        self._vocoder = load_vocoder(self._device)
+            self.call_from_thread(status.update, "▸ LOADING VOCODER...")
+            self._vocoder = load_vocoder(self._device)
 
-        self.call_from_thread(status.update, "▸ COMPUTING LATENT SPACE...")
-        latents, spectrograms = extract_latents(self._model, dataloader, self._device)
+            self.call_from_thread(status.update, "▸ COMPUTING LATENT SPACE...")
+            latents, spectrograms = extract_latents(self._model, dataloader, self._device)
 
-        descriptors = [compute_descriptors(s) for s in spectrograms]
-        desc_keys = ["sub", "punch", "click", "bright", "decay"]
-        desc_name_map = {
-            "sub": "Sub", "punch": "Punch", "click": "Click",
-            "bright": "Bright", "decay": "Decay",
-        }
-        desc_arrays = {k: np.array([d[k] for d in descriptors]) for k in desc_keys}
+            analysis = analyze_latent_space(latents, spectrograms)
+            self._pca = analysis.pca
+            self._pc_projected = analysis.pc_projected
+            self._pc_names = analysis.pc_names
+            self._pc_mins = analysis.pc_mins
+            self._pc_maxs = analysis.pc_maxs
 
-        self._pca = PCA(n_components=N_PCS)
-        self._pc_projected = self._pca.fit_transform(latents)
+            def _mount_sliders():
+                panel = self.query_one("#left-panel")
+                btn = self.query_one("#generate-btn", Button)
+                for i in range(N_PCS):
+                    panel.mount(SliderBar(i, self._pc_names[i], id=f"pc_slider_{i}"), before=btn)
+                btn.disabled = False
+                status.update("READY  ──  SPACE or ▶ generate  │  ◂ ▸ adjust  │  TAB switch")
 
-        self._pc_names = []
-        used: set[str] = set()
-        for i in range(N_PCS):
-            pc_vals = self._pc_projected[:, i]
-            pc_mean, pc_std = pc_vals.mean(), pc_vals.std()
-            best_desc, best_corr = None, 0.0
-            for dk in desc_keys:
-                if dk in used:
-                    continue
-                dv = desc_arrays[dk]
-                d_mean, d_std = dv.mean(), dv.std()
-                if pc_std > 0 and d_std > 0:
-                    corr = float(((pc_vals - pc_mean) * (dv - d_mean)).mean() / (pc_std * d_std))
-                else:
-                    corr = 0.0
-                if abs(corr) > abs(best_corr):
-                    best_corr = corr
-                    best_desc = dk
-            if best_desc and abs(best_corr) >= 0.15:
-                used.add(best_desc)
-                self._pc_names.append(desc_name_map.get(best_desc, best_desc.capitalize()))
-                if best_corr < 0:
-                    self._pca.components_[i] *= -1
-                    self._pc_projected[:, i] *= -1
-            else:
-                self._pc_names.append(f"PC{i + 1}")
-
-        self._pc_mins = [float(np.percentile(self._pc_projected[:, i], 2)) for i in range(N_PCS)]
-        self._pc_maxs = [float(np.percentile(self._pc_projected[:, i], 98)) for i in range(N_PCS)]
-
-        def _mount_sliders():
-            panel = self.query_one("#left-panel")
-            btn = self.query_one("#generate-btn", Button)
-            for i in range(N_PCS):
-                panel.mount(SliderBar(i, self._pc_names[i], id=f"pc_slider_{i}"), before=btn)
-            btn.disabled = False
-            status.update("READY  ──  SPACE or ▶ generate  │  ◂ ▸ adjust  │  TAB switch")
-
-        self.call_from_thread(_mount_sliders)
-        self._loaded = True
+            self.call_from_thread(_mount_sliders)
+            self._loaded = True
+        except Exception as e:
+            self.call_from_thread(status.update, f"ERROR: {e}")
 
     def _get_pc_values(self) -> list[float]:
         vals = []

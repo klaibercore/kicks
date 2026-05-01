@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { Slider } from "@/components/ui/slider";
 import { Separator } from "@/components/ui/separator";
 import { Card, CardContent } from "@/components/ui/card";
@@ -21,11 +22,18 @@ export default function Home() {
     waveformData,
     kickBuffer,
     vocoder,
+    presets,
     handleSliderChange,
     handleGenerate,
     randomize,
     download,
+    savePreset,
+    loadPreset,
+    deletePreset,
   } = useSynth();
+
+  const [presetName, setPresetName] = useState("");
+  const [selectedPreset, setSelectedPreset] = useState("");
 
   return (
     <>
@@ -46,6 +54,13 @@ export default function Home() {
               Griffin-LIM vocoder is active. Sound quality may be lower than with the default BigVGAN neural vocoder.
             </div>
           )}
+        </div>
+
+        {/* Keyboard shortcuts hint */}
+        <div className="mb-4 flex gap-4 text-xs text-muted-foreground/50 font-mono">
+          <span><kbd className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10">Space</kbd> Generate</span>
+          <span><kbd className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10">R</kbd> Randomise</span>
+          <span><kbd className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10">S</kbd> Download</span>
         </div>
 
         {/* 3-column layout: spectrogram | card | waveform — full browser width */}
@@ -121,6 +136,66 @@ export default function Home() {
                   Download WAV
                 </button>
               </div>
+
+              {/* ── Presets ────────────────────────────── */}
+              {sliders.length > 0 && (
+                <div className="space-y-3">
+                  <Separator className="bg-white/[0.06]" />
+                  <label className="text-sm font-semibold tracking-wide uppercase text-muted-foreground">
+                    Presets
+                  </label>
+
+                  {/* Save preset */}
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={presetName}
+                      onChange={(e) => setPresetName(e.target.value)}
+                      placeholder="Preset name..."
+                      className="flex-1 px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-violet-500/50 transition-colors"
+                    />
+                    <button
+                      onClick={() => { savePreset(presetName); setPresetName(""); }}
+                      disabled={!presetName.trim()}
+                      className="px-4 py-2 rounded-lg border border-violet-500/30 bg-violet-500/10 text-xs font-semibold tracking-wide uppercase text-violet-300 hover:bg-violet-500/20 disabled:opacity-40 transition-all"
+                    >
+                      Save
+                    </button>
+                  </div>
+
+                  {/* Load / delete preset */}
+                  {presets.length > 0 && (
+                    <div className="flex gap-2">
+                      <select
+                        value={selectedPreset}
+                        onChange={(e) => setSelectedPreset(e.target.value)}
+                        className="flex-1 px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-foreground focus:outline-none focus:border-violet-500/50 transition-colors"
+                      >
+                        <option value="">Load preset...</option>
+                        {presets.map((p) => (
+                          <option key={p.name} value={p.name}>
+                            {p.name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        onClick={() => { loadPreset(selectedPreset); }}
+                        disabled={!selectedPreset}
+                        className="px-4 py-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-xs font-semibold tracking-wide uppercase text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40 transition-all"
+                      >
+                        Load
+                      </button>
+                      <button
+                        onClick={() => { deletePreset(selectedPreset); setSelectedPreset(""); }}
+                        disabled={!selectedPreset}
+                        className="px-3 py-2 rounded-lg border border-red-500/20 bg-red-500/10 text-xs font-semibold tracking-wide uppercase text-red-300 hover:bg-red-500/20 disabled:opacity-40 transition-all"
+                      >
+                        Del
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
 
               <Separator className="bg-white/[0.06]" />
 

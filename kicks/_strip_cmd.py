@@ -262,8 +262,9 @@ def run_strip(
     min_duration: float = 50.0,
     threshold: float = 0.01,
     fade_ms: float = 10.0,
-    backup: bool = False,
+    backup: bool = True,
     exclude_loops: bool = True,
+    move_loops: bool = False,
 ) -> None:
     """Strip non-kick content from all WAVs in a directory."""
     if not os.path.isdir(data):
@@ -275,8 +276,8 @@ def run_strip(
         print(f"No WAV files found in {data}")
         return
 
-    if backup:
-        backup_dir = data.rstrip("/") + "_backup"
+    if backup and not dry_run:
+        backup_dir = os.path.join(os.path.dirname(data.rstrip("/")), os.path.basename(data.rstrip("/")) + "_backup")
         if not os.path.exists(backup_dir):
             os.makedirs(backup_dir)
             for f in wav_files:
@@ -319,12 +320,16 @@ def run_strip(
                 durations.append(result["duration_ms"])
             progress.update(task, advance=1)
 
-    # Move detected loops to reject directory
+    # Copy detected loops to reject directory (move only with --move-loops)
     if loop_files and not dry_run:
         os.makedirs(loops_dir, exist_ok=True)
         for f in loop_files:
-            shutil.move(os.path.join(data, f), os.path.join(loops_dir, f))
-        print(f"\nMoved {len(loop_files)} loops to {loops_dir}/")
+            if move_loops:
+                shutil.move(os.path.join(data, f), os.path.join(loops_dir, f))
+            else:
+                shutil.copy2(os.path.join(data, f), os.path.join(loops_dir, f))
+        action = "Moved" if move_loops else "Copied"
+        print(f"\n{action} {len(loop_files)} loops to {loops_dir}/")
 
     # Summary
     print(f"\nResults:")

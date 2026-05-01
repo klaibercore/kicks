@@ -1,12 +1,15 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
+import { useAudioContext } from "./use-audio-context";
 
 export function useAudioPlayer() {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [waveform, setWaveform] = useState<number[] | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playingCluster, setPlayingCluster] = useState<number | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const getCtx = useAudioContext();
 
   const loadSample = useCallback((idx: number) => {
     const audioSrc = `/api/play?idx=${idx}`;
@@ -18,10 +21,15 @@ export function useAudioPlayer() {
       setPlayingCluster(null);
     }
 
-    fetch(audioSrc)
+    // Abort any in-flight decode
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    fetch(audioSrc, { signal: controller.signal })
       .then((r) => r.arrayBuffer())
       .then((buf) => {
-        const ctx = new AudioContext();
+        const ctx = getCtx();
         return ctx.decodeAudioData(buf);
       })
       .then((audioBuf) => {
@@ -37,8 +45,10 @@ export function useAudioPlayer() {
         const mx = Math.max(...wf);
         setWaveform(wf.map((v) => v / (mx || 1)));
       })
-      .catch(() => setWaveform(null));
-  }, []);
+      .catch((err) => {
+        if (err.name !== "AbortError") setWaveform(null);
+      });
+  }, [getCtx]);
 
   const clearSample = useCallback(() => {
     setWaveform(null);

@@ -242,6 +242,8 @@ export function ScatterPlot({
         onClick={handleCanvasClick}
         onMouseMove={handleCanvasMove}
         onMouseLeave={() => setHoveredIdx(null)}
+        role="img"
+        aria-label={`Scatter plot: ${xLabel} vs ${yLabel}, ${samples.length} points`}
       />
     </div>
   );

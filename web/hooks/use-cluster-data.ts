@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ClusterData, ClusterProfile, PCName } from "@/types/cluster";
 import { DESCRIPTOR_KEYS, DESCRIPTOR_LABELS } from "@/types/cluster";
 import type { DescriptorKey } from "@/types/cluster";
@@ -9,16 +9,30 @@ import { pearsonCorrelation } from "@/lib/colors";
 export function useClusterData() {
   const [data, setData] = useState<ClusterData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const fetchData = useCallback(() => {
+    setLoading(true);
+    setError(null);
     fetch("/api/cluster-data")
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error(`Server returned ${r.status}`);
+        return r.json();
+      })
       .then((d) => {
+        if (d.error) throw new Error(d.error);
         setData(d);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch((err) => {
+        setError(err.message || "Failed to load cluster data");
+        setLoading(false);
+      });
   }, []);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
 
   const correlations = useMemo(() => {
     if (!data) return {};
@@ -82,5 +96,5 @@ export function useClusterData() {
     });
   }, [data, correlations]);
 
-  return { data, loading, correlations, clusterProfiles, pcNames };
+  return { data, loading, error, retry: fetchData, correlations, clusterProfiles, pcNames };
 }

@@ -1,0 +1,41 @@
+version: "3.8"
+
+services:
+  backend:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./output:/app/output
+    environment:
+      - KICKS_DATA_DIR=/app/data/kicks
+      - KICKS_MODEL_DIR=/app/models
+      - KICKS_OUTPUT_DIR=/app/output
+      - KICKS_VOCODER=bigvgan
+      - KICKS_CORS_ORIGINS=http://localhost:3000
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  frontend:
+    image: node:22-slim
+    working_dir: /app
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./web:/app
+      - /app/node_modules
+    environment:
+      - NEXT_PUBLIC_API_URL=http://backend:8080
+    command: >
+      sh -c "npm install && npm run dev"
+    depends_on:
+      - backend
+    restart: unless-stopped

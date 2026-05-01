@@ -2,20 +2,23 @@
 
 import io
 import os
+import time
 from contextlib import asynccontextmanager
 
 import numpy as np
 import torch
+import torchaudio
 import soundfile as sf
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from sklearn.decomposition import PCA
 
 from kicks import KickDataset, KickDataloader, VAE
-from kicks.cluster import extract_latents, compute_descriptors
+from kicks.cluster import extract_latents
 from kicks.config import get_device, load_vae_from_checkpoint, DATA_DIR, BEST_CHECKPOINT, N_PCS
 from kicks.model import SAMPLE_RATE
+from kicks.pca_analysis import analyze_latent_space
 from kicks.vocoder import load_vocoder, spec_to_audio
 
 
@@ -55,86 +58,16 @@ async def _lifespan(app: FastAPI):
 
     latents, spectrograms = extract_latents(_state.model, dataloader, _state.device)
 
-    # Compute perceptual descriptors for PC naming
     print("Computing descriptors for PC naming...")
-    descriptors = [compute_descriptors(s) for s in spectrograms]
-    desc_keys = ["sub", "punch", "click", "bright", "decay"]
-    desc_name_map = {
-        "sub": "Sub", "punch": "Punch", "click": "Click",
-        "bright": "Bright", "decay": "Decay",
-    }
-    desc_arrays = {k: np.array([d[k] for d in descriptors]) for k in desc_keys}
+    analysis = analyze_latent_space(latents, spectrograms)
+    _state.pca = analysis.pca
+    _state.pc_projected = analysis.pc_projected
+    _state.pc_names = analysis.pc_names
+    _state.pc_mins = analysis.pc_mins
+    _state.pc_maxs = analysis.pc_maxs
+    _state.decay_idx = analysis.decay_idx
+    _state.decay_compensation = analysis.decay_compensation
 
-    # Fit PCA
-    _state.pca = PCA(n_components=N_PCS)
-    _state.pc_projected = _state.pca.fit_transform(latents)
-
-    # Auto-name PCs from highest descriptor correlations and flip negative axes
-    _state.pc_names = []
-    used: set[str] = set()
-    for i in range(N_PCS):
-        pc_vals = _state.pc_projected[:, i]
-        pc_mean, pc_std = pc_vals.mean(), pc_vals.std()
-        best_desc, best_corr = None, 0.0
-        for dk in desc_keys:
-            if dk in used:
-                continue
-            dv = desc_arrays[dk]
-            d_mean, d_std = dv.mean(), dv.std()
-            if pc_std > 0 and d_std > 0:
-                corr = float(((pc_vals - pc_mean) * (dv - d_mean)).mean() / (pc_std * d_std))
-            else:
-                corr = 0.0
-            if abs(corr) > abs(best_corr):
-                best_corr = corr
-                best_desc = dk
-        if best_desc and abs(best_corr) >= 0.15:
-            used.add(best_desc)
-            _state.pc_names.append(desc_name_map.get(best_desc, best_desc.capitalize()))
-            if best_corr < 0:
-                _state.pca.components_[i] *= -1
-                _state.pc_projected[:, i] *= -1
-                print(f"  PC{i + 1} -> {_state.pc_names[-1]} (r={best_corr:.2f}, flipped)")
-            else:
-                print(f"  PC{i + 1} -> {_state.pc_names[-1]} (r={best_corr:.2f})")
-        else:
-            _state.pc_names.append(f"PC{i + 1}")
-            print(f"  PC{i + 1} -> PC{i + 1} (no strong correlation)")
-
-    _state.pc_mins = [float(np.percentile(_state.pc_projected[:, i], 2)) for i in range(N_PCS)]
-    _state.pc_maxs = [float(np.percentile(_state.pc_projected[:, i], 98)) for i in range(N_PCS)]
-
-    # Decay decorrelation: compute per-PC compensation ratios so that
-    # non-Decay sliders don't change the perceived sample length.
-    _state.decay_idx = None
-    _state.decay_compensation = None
-    for i, name in enumerate(_state.pc_names):
-        if name == "Decay":
-            _state.decay_idx = i
-            break
-
-    if _state.decay_idx is not None:
-        decay_vals = desc_arrays["decay"]
-        d_mean, d_std = decay_vals.mean(), decay_vals.std()
-        # Regression coefficient of each PC on the decay descriptor
-        betas = np.zeros(N_PCS)
-        for i in range(N_PCS):
-            pc_vals = _state.pc_projected[:, i]
-            pc_std = pc_vals.std()
-            if pc_std > 0 and d_std > 0:
-                r = float(np.corrcoef(pc_vals, decay_vals)[0, 1])
-                betas[i] = r * d_std / pc_std
-        decay_beta = betas[_state.decay_idx]
-        if abs(decay_beta) > 1e-8:
-            # ratio[i] = how much Decay PC must shift per unit of PC_i to cancel its decay effect
-            ratios = betas / decay_beta
-            ratios[_state.decay_idx] = 0.0  # Decay slider keeps its own effect
-            _state.decay_compensation = ratios
-            print(f"Decay decorrelation enabled (ratios: {ratios.round(3)})")
-        else:
-            print("Decay decorrelation skipped (Decay PC has negligible decay correlation)")
-
-    print(f"PCA variance explained: {_state.pca.explained_variance_ratio_}")
     for i in range(N_PCS):
         print(f"{_state.pc_names[i]} range: [{_state.pc_mins[i]:.3f}, {_state.pc_maxs[i]:.3f}]")
     print("API ready")
@@ -142,10 +75,60 @@ async def _lifespan(app: FastAPI):
     yield
 
 
+# --- Rate limiter (simple token bucket) ---
+
+class _RateLimiter:
+    def __init__(self, rate: float = 10.0):
+        self._rate = rate
+        self._tokens = rate
+        self._last = time.monotonic()
+
+    def __call__(self) -> None:
+        now = time.monotonic()
+        self._tokens = min(self._rate, self._tokens + self._rate * (now - self._last))
+        self._last = now
+        if self._tokens < 1.0:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=429, detail="Rate limit exceeded. Try again shortly.")
+        self._tokens -= 1.0
+
+
+_rate_limiter = _RateLimiter(rate=10.0)
+
+
+# --- LRU cache for generated audio (slider hash → bytes) ---
+
+class _LRUCache:
+    def __init__(self, max_size: int = 100):
+        self._max_size = max_size
+        self._store: dict[str, bytes] = {}
+        self._order: list[str] = []
+
+    def get(self, key: str) -> bytes | None:
+        if key in self._store:
+            self._order.remove(key)
+            self._order.append(key)
+            return self._store[key]
+        return None
+
+    def put(self, key: str, value: bytes) -> None:
+        if key in self._store:
+            self._order.remove(key)
+        elif len(self._store) >= self._max_size:
+            oldest = self._order.pop(0)
+            del self._store[oldest]
+        self._store[key] = value
+        self._order.append(key)
+
+
+_waveform_cache = _LRUCache(max_size=100)
+
+
 app = FastAPI(title="Kicks API", lifespan=_lifespan)
+_cors_origins = os.environ.get("KICKS_CORS_ORIGINS", "http://localhost:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -329,7 +312,15 @@ def _parse_pc_values(request: Request) -> list[float]:
     """Map slider positions [0,1] to PC-space values with decay decorrelation."""
     pc_values = []
     for i in range(N_PCS):
-        raw = float(request.query_params.get(f"pc{i + 1}", "0.5"))
+        raw_str = request.query_params.get(f"pc{i + 1}", "0.5")
+        try:
+            raw = float(raw_str)
+        except (ValueError, TypeError):
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=422,
+                detail={"error": f"Invalid value for pc{i + 1}: {raw_str!r}"},
+            )
         val = _state.pc_mins[i] + raw * (_state.pc_maxs[i] - _state.pc_mins[i])
         val = max(_state.pc_mins[i], min(_state.pc_maxs[i], val))
         pc_values.append(val)
@@ -348,7 +339,14 @@ def _parse_pc_values(request: Request) -> list[float]:
 
 
 @app.get("/generate")
-async def generate(request: Request):
+async def generate(request: Request, _rl: None = Depends(_rate_limiter)):
+    # Check LRU cache
+    cache_key = request.url.query or ""
+    if cache_key:
+        cached = _waveform_cache.get(cache_key)
+        if cached is not None:
+            return StreamingResponse(io.BytesIO(cached), media_type="audio/wav")
+
     pc_values = _parse_pc_values(request)
 
     z_np = _state.pca.inverse_transform([pc_values])
@@ -356,17 +354,68 @@ async def generate(request: Request):
 
     with torch.no_grad():
         spec = _state.model.decode(z)
-        waveform = spec_to_audio(spec, _state.dataset, _state.vocoder, _state.device)
+        waveform = spec_to_audio(spec, _state.dataset, _state.vocoder, _state.device)  # (B, T)
+
+    # --- Optional envelope shaper ---
+    attack_ms = request.query_params.get("attack_ms")
+    decay_ms = request.query_params.get("decay_ms")
+    if attack_ms is not None or decay_ms is not None:
+        wf = waveform.squeeze(0)  # (T,)
+        n = len(wf)
+        env = torch.ones(n, dtype=wf.dtype)
+        if attack_ms is not None:
+            try:
+                a_ms = max(0.0, float(attack_ms))
+                a_samples = min(n, int(SAMPLE_RATE * a_ms / 1000))
+                if a_samples > 0:
+                    env[:a_samples] = torch.linspace(0, 1, a_samples)
+            except (ValueError, TypeError):
+                pass
+        if decay_ms is not None:
+            try:
+                d_ms = max(0.0, float(decay_ms))
+                d_samples = min(n, int(SAMPLE_RATE * d_ms / 1000))
+                if d_samples > 0:
+                    env[-d_samples:] = torch.linspace(1, 0, d_samples)
+            except (ValueError, TypeError):
+                pass
+        waveform = (wf * env).unsqueeze(0)
+
+    # --- Optional distortion / saturation ---
+    drive_str = request.query_params.get("drive")
+    filter_str = request.query_params.get("filter")
+    if drive_str is not None or filter_str is not None:
+        wf = waveform.squeeze(0)  # (T,)
+        if drive_str is not None:
+            try:
+                drive = max(0.0, min(1.0, float(drive_str)))
+                wf = torch.tanh(wf * (1.0 + drive * 8.0)) * (1.0 / (1.0 + drive * 0.3))
+            except (ValueError, TypeError):
+                pass
+        if filter_str is not None:
+            try:
+                cutoff = max(40.0, min(18000.0, float(filter_str)))
+                wf = torchaudio.functional.lowpass_biquad(
+                    wf.unsqueeze(0), SAMPLE_RATE, cutoff_freq=cutoff, Q=0.707,
+                ).squeeze(0)
+            except (ValueError, TypeError):
+                pass
+        waveform = wf.unsqueeze(0)
 
     buf = io.BytesIO()
     sf.write(buf, waveform.squeeze(0).numpy(), SAMPLE_RATE, format="WAV")
     buf.seek(0)
 
+    # Populate cache
+    if cache_key:
+        _waveform_cache.put(cache_key, buf.getvalue())
+        buf.seek(0)
+
     return StreamingResponse(buf, media_type="audio/wav")
 
 
 @app.get("/spectrogram")
-async def spectrogram_data(request: Request):
+async def spectrogram_data(request: Request, _rl: None = Depends(_rate_limiter)):
     pc_values = _parse_pc_values(request)
 
     z_np = _state.pca.inverse_transform([pc_values])

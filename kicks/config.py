@@ -22,7 +22,7 @@ def load_vae_from_checkpoint(
     """Load a VAE from checkpoint, auto-detecting latent_dim."""
     from .model import VAE
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     if "latent_dim" in checkpoint:
         latent_dim = checkpoint["latent_dim"]
     elif "model" in checkpoint and "fc_mu.weight" in checkpoint["model"]:

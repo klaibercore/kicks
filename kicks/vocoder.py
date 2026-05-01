@@ -21,19 +21,26 @@ VOCODER_DIR = "models/vocoder"
 # BigVGAN
 # ---------------------------------------------------------------------------
 
+_patched = False
+
+
 def _patch_bigvgan_from_pretrained():
     """Patch BigVGAN._from_pretrained to work with huggingface_hub >= 1.0."""
+    global _patched
+    if _patched:
+        return
     import bigvgan as _bigvgan
 
     original = _bigvgan.BigVGAN._from_pretrained.__func__
 
     @classmethod  # type: ignore[misc]
-    def _patched(cls, **kwargs):
+    def _patched_fn(cls, **kwargs):
         kwargs.setdefault("proxies", None)
         kwargs.setdefault("resume_download", False)
         return original(cls, **kwargs)
 
-    _bigvgan.BigVGAN._from_pretrained = _patched
+    _bigvgan.BigVGAN._from_pretrained = _patched_fn
+    _patched = True
 
 
 def load_bigvgan(device: torch.device):
@@ -47,7 +54,7 @@ def load_bigvgan(device: torch.device):
     pth_files = sorted(glob.glob(os.path.join(VOCODER_DIR, "*.pth")))
     if pth_files:
         pth_path = pth_files[0]
-        checkpoint = torch.load(pth_path, map_location=device)
+        checkpoint = torch.load(pth_path, map_location=device, weights_only=True)
         model.load_state_dict(checkpoint["generator"])
         print(f"Loaded fine-tuned vocoder from {pth_path} (epoch {checkpoint['epoch']})")
     else:

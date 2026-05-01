@@ -110,11 +110,14 @@ export function Scene3D({
   );
   const gridOpacity = resolvedTheme === "dark" ? 0.06 : 0.12;
 
-  const flips: [number, number, number] = [
-    pcNames[0]?.correlation < 0 ? -1 : 1,
-    pcNames[1]?.correlation < 0 ? -1 : 1,
-    pcNames[2]?.correlation < 0 ? -1 : 1,
-  ];
+  const flips: [number, number, number] = useMemo(
+    () => [
+      pcNames[0]?.correlation < 0 ? -1 : 1,
+      pcNames[1]?.correlation < 0 ? -1 : 1,
+      pcNames[2]?.correlation < 0 ? -1 : 1,
+    ],
+    [pcNames],
+  );
 
   const getCoords = useMemo(() => {
     if (!spherize) {

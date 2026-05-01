@@ -121,8 +121,9 @@ def strip(
     min_duration: float = typer.Option(50.0, "--min-duration", help="Min kick duration in ms"),
     threshold: float = typer.Option(0.01, "--threshold", help="Decay threshold (fraction of peak)"),
     fade_ms: float = typer.Option(10.0, "--fade-ms", help="Fade-out length in ms"),
-    backup: bool = typer.Option(False, "--backup", help="Copy originals to backup dir first"),
-    exclude_loops: bool = typer.Option(True, "--exclude-loops/--keep-loops", help="Detect and move full loops to reject dir"),
+    backup: bool = typer.Option(True, "--backup/--no-backup", help="Copy originals to backup dir before modifying"),
+    exclude_loops: bool = typer.Option(True, "--exclude-loops/--keep-loops", help="Detect and exclude full loops"),
+    move_loops: bool = typer.Option(False, "--move-loops", help="Move detected loops out of source dir (default: copy only)"),
 ) -> None:
     """Strip non-kick content from drum loop WAVs."""
     from kicks._strip_cmd import run_strip
@@ -136,6 +137,7 @@ def strip(
         fade_ms=fade_ms,
         backup=backup,
         exclude_loops=exclude_loops,
+        move_loops=move_loops,
     )
 
 
