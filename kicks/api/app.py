@@ -16,6 +16,7 @@ account.
 from __future__ import annotations
 
 import io
+import math
 import os
 import re
 import uuid
@@ -33,6 +34,8 @@ from ..analysis.descriptors import compute_descriptors
 from ..analysis.evaluation import analyze_hit, score_sample
 from ..audio import effects
 from ..audio.constants import SAMPLE_RATE
+from ..audio.controls import correct_waveform
+from ..audio.mel import spectrogram as waveform_spectrogram
 from ..audio.vocoder import spec_to_audio
 from ..instruments import available, get_profile, normalize
 from .auth import Auth, InsufficientCredits, User
@@ -43,6 +46,7 @@ state = ServerState()
 auth = Auth()
 rate_limiter = RateLimiter(rate=10.0)
 audio_cache = LRUCache(max_size=100)
+render_cache: LRUCache[tuple[torch.Tensor, torch.Tensor]] = LRUCache(max_size=32)
 
 
 @asynccontextmanager
@@ -98,7 +102,10 @@ def _float_param(request: Request, key: str) -> float | None:
     if raw is None:
         return None
     try:
-        return float(raw)
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError("non-finite parameter")
+        return value
     except (TypeError, ValueError):
         raise HTTPException(
             status_code=422, detail=f"Invalid value for {key}: {raw!r}",
@@ -137,14 +144,7 @@ def _slider_positions(request: Request, inst: InstrumentState) -> list[float]:
 def _latent_for(request: Request, inst: InstrumentState) -> torch.Tensor:
     values = slider_positions_to_axis_values(_slider_positions(request, inst), inst.basis)
     if inst.basis.is_descriptor_basis:
-        # Closed loop: decode, measure, correct. The decoder's response is
-        # nonlinear, so two Newton steps roughly double slider authority versus
-        # the open-loop linear map.
-        z = inst.basis.basis.solve(
-            values,
-            measure_fn=lambda z_arr: inst.measure(z_arr, state.device),
-            n_iter=2,
-        )
+        z = inst.basis.basis.solve(values, measure_fn=inst.response)
     else:
         z = inst.basis.basis.inverse_transform([values])
     return torch.tensor(z, dtype=torch.float32).to(state.device)
@@ -156,23 +156,33 @@ def _synthesize(request: Request, inst: InstrumentState) -> tuple[torch.Tensor, 
     Shared by /generate and /evaluate so the evaluation scores exactly the audio
     the client receives, shaping included.
     """
+    positions = _slider_positions(request, inst)
+    attack_ms = _float_param(request, "attack_ms")
+    decay_ms = _float_param(request, "decay_ms")
+    drive = _float_param(request, "drive")
+    cutoff = _float_param(request, "filter")
+    key = repr((id(inst.model), id(state.vocoder), positions, attack_ms, decay_ms, drive, cutoff))
+    cached = render_cache.get(key)
+    if cached is not None:
+        return cached
     z = _latent_for(request, inst)
     with torch.no_grad():
         spec = inst.model.decode(z)
     waveform = spec_to_audio(spec, state.vocoder, state.device)  # (B, T)
 
     wf = waveform.squeeze(0)
-    attack_ms = _float_param(request, "attack_ms")
-    decay_ms = _float_param(request, "decay_ms")
+    if inst.basis.is_descriptor_basis and inst.profile.waveform_controls:
+        targets = slider_positions_to_axis_values(positions, inst.basis)
+        wf = correct_waveform(wf, np.array(targets), np.array(inst.basis.maxs) - inst.basis.mins, inst.profile)
     if attack_ms is not None or decay_ms is not None:
         wf = effects.apply_envelope(wf, attack_ms, decay_ms)
-    drive = _float_param(request, "drive")
     if drive is not None:
         wf = effects.apply_drive(wf, drive)
-    cutoff = _float_param(request, "filter")
     if cutoff is not None:
         wf = effects.apply_lowpass(wf, cutoff)
-    return spec, wf.unsqueeze(0)
+    result = spec.cpu(), wf.unsqueeze(0)
+    render_cache.put(key, result)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +245,9 @@ async def config(request: Request) -> dict:
             "max": 1,
             "default": 0.5,
             "step": 0.01,
+            "description": next((d.doc for d in profile.descriptors if d.label == name), "Latent variation"),
+            "target_min": inst.basis.mins[i],
+            "target_max": inst.basis.maxs[i],
         }
         for i, name in enumerate(inst.basis.names)
     ]
@@ -245,6 +258,7 @@ async def config(request: Request) -> dict:
         "sliders": sliders,
         "vocoder": state.vocoder_type,
         "control": state.control_basis,
+        "calibration": inst.basis.calibration,
     }
 
 
@@ -265,7 +279,7 @@ async def generate(
     _, waveform = _synthesize(request, inst)
 
     buf = io.BytesIO()
-    sf.write(buf, waveform.squeeze(0).numpy(), SAMPLE_RATE, format="WAV")
+    sf.write(buf, waveform.squeeze(0).numpy(), SAMPLE_RATE, format="WAV", subtype="PCM_24")
     if cache_key:
         audio_cache.put(cache_key, buf.getvalue())
     buf.seek(0)
@@ -285,7 +299,11 @@ async def evaluate(
     """
     inst = _resolve(request)
     spec, waveform = _synthesize(request, inst)
-    descriptors = compute_descriptors(spec, inst.profile)
+    descriptors = compute_descriptors(
+        waveform_spectrogram(waveform, n_frames=inst.model.n_frames)
+        if inst.profile.waveform_controls else spec,
+        inst.profile,
+    )
 
     metrics = analyze_hit(waveform.squeeze(0).numpy().astype(np.float32), inst.profile)
     if metrics is None:

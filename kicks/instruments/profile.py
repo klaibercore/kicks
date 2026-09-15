@@ -35,7 +35,7 @@ from typing import Literal
 
 import numpy as np
 
-from ..audio.constants import frames_to_ms
+from ..audio.constants import LOG_MEL_MAX, LOG_MEL_MIN, MS_PER_FRAME, frames_to_ms
 
 # ---------------------------------------------------------------------------
 # Spectrogram regions and perceptual descriptors
@@ -71,7 +71,9 @@ class Region:
                 f"{frames_to_ms(f0):.0f}-{f1_ms} ms")
 
 
-DescriptorKind = Literal["mean", "log_ratio", "fraction", "inverse_ratio"]
+DescriptorKind = Literal[
+    "mean", "log_ratio", "fraction", "inverse_ratio", "power_db_ratio", "centroid_ms",
+]
 
 _EPS = 1e-8
 
@@ -103,6 +105,23 @@ class DescriptorSpec:
 
     def compute(self, spec: np.ndarray) -> float:
         """Evaluate this descriptor on a (n_mels, n_frames) spectrogram."""
+        if self.kind in ("power_db_ratio", "centroid_ms"):
+            # Recover linear magnitude before measuring energy: ratios of
+            # normalized logarithms vary with loudness and the silence padding.
+            magnitude = np.maximum(
+                np.exp(spec.astype(np.float64) * (LOG_MEL_MAX - LOG_MEL_MIN) + LOG_MEL_MIN)
+                - np.exp(LOG_MEL_MIN), 0.0,
+            )
+            energy = magnitude ** 2
+            a = self.region.view(energy)
+            if self.kind == "centroid_ms":
+                weights = a.sum(axis=0)
+                times = (np.arange(a.shape[1]) + self.region.frames[0]) * MS_PER_FRAME
+                return float(weights @ times / (weights.sum() + 1e-20))
+            if self.reference is None:
+                raise ValueError(f"descriptor {self.key!r} needs a reference region")
+            b = self.reference.view(energy)
+            return float(10 * np.log10((a.mean() + 1e-20) / (b.mean() + 1e-20)))
         a = self.region.mean(spec)
         if self.kind == "mean":
             return float(a)
@@ -369,6 +388,7 @@ class InstrumentProfile:
     #: doing for the axis a listener notices most (decay length, usually).
     decorrelated_descriptor: str | None = "decay"
     description: str = ""
+    waveform_controls: bool = False
 
     # -- descriptors --------------------------------------------------------
 

@@ -7,7 +7,6 @@ tools do not drag torch and BigVGAN into their import graph.
 from __future__ import annotations
 
 import os
-import warnings
 
 import numpy as np
 import pyloudnorm as pyln
@@ -74,13 +73,13 @@ def lufs_normalize(
     loudness = meter.integrated_loudness(audio_np)
     if not np.isfinite(loudness):
         return audio
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore", message="Possible clipped samples", module="pyloudnorm",
-        )
-        audio_np = pyln.normalize.loudness(audio_np, loudness, target_lufs)
-    audio_np = np.clip(audio_np, -1.0, 1.0)
-    return torch.from_numpy(audio_np).unsqueeze(0).float()
+    # Preserve crest factor: short hits often cannot reach the LUFS target
+    # without clipping. Limit the gain instead of flattening their peaks.
+    gain = 10.0 ** ((target_lufs - loudness) / 20.0)
+    peak = float(np.max(np.abs(audio_np)))
+    if peak > 0:
+        gain = min(gain, 1.0 / peak)
+    return (audio * gain).float()
 
 
 def load_waveform(

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import random
+import hashlib
 
 import numpy as np
 import torch
@@ -41,24 +42,33 @@ def fit_latent_prior(
     """
     from sklearn.mixture import GaussianMixture
 
-    if not refresh and os.path.exists(cache_path):
-        cached = np.load(cache_path)
-        if cached["means"].shape[1] == model.latent_dim:
-            gmm = GaussianMixture(
-                n_components=len(cached["weights"]), covariance_type="full",
-            )
-            gmm.weights_ = cached["weights"]
-            gmm.means_ = cached["means"]
-            gmm.covariances_ = cached["covariances"]
-            gmm.precisions_cholesky_ = cached["precisions_cholesky"]
-            return gmm
-
     from ..audio import io
-    from ..data import load_spectrogram
-
     files = io.list_wavs(data_dir)
     if len(files) > n_fit:
         files = sorted(random.Random(42).sample(files, n_fit))
+    h = hashlib.sha256(b"peak_safe_lufs_v1")
+    h.update(repr((n_fit, n_components, model.n_frames)).encode())
+    for key, value in model.state_dict().items():
+        h.update(key.encode())
+        h.update(value.detach().cpu().numpy().tobytes())
+    for name in files:
+        stat = os.stat(os.path.join(data_dir, name))
+        h.update(repr((name, stat.st_size, stat.st_mtime_ns)).encode())
+    fingerprint = h.hexdigest()
+
+    if not refresh and os.path.exists(cache_path):
+        with np.load(cache_path, allow_pickle=False) as cached:
+            if "fingerprint" in cached and str(cached["fingerprint"]) == fingerprint:
+                gmm = GaussianMixture(
+                    n_components=len(cached["weights"]), covariance_type="full",
+                )
+                gmm.weights_ = cached["weights"]
+                gmm.means_ = cached["means"]
+                gmm.covariances_ = cached["covariances"]
+                gmm.precisions_cholesky_ = cached["precisions_cholesky"]
+                return gmm
+
+    from ..data import load_spectrogram
 
     print(f"Encoding {len(files)} corpus samples to fit the latent prior...")
     meter = io.make_meter()
@@ -86,6 +96,7 @@ def fit_latent_prior(
     os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
     np.savez(
         cache_path,
+        fingerprint=fingerprint,
         weights=gmm.weights_, means=gmm.means_,
         covariances=gmm.covariances_,
         precisions_cholesky=gmm.precisions_cholesky_,
@@ -109,6 +120,9 @@ def generate(
     """Generate one-shots: GMM-prior sampling plus best-of-k perceptual selection."""
     import soundfile as sf
 
+    if count < 1 or best_of < 1:
+        raise ValueError("count and best_of must be positive")
+
     profile: InstrumentProfile = get_profile(instrument)
     data_dir = data_dir or profile.paths.data_dir
     out_dir = out_dir or profile.paths.output_dir
@@ -123,6 +137,7 @@ def generate(
     gmm = fit_latent_prior(
         model, device, data_dir, profile.paths.latent_prior, refresh=refresh_prior,
     )
+    gmm.random_state = np.random.RandomState(seed)
     vocoder = load_vocoder(device, vocoder_type, profile.paths.vocoder_dir)
     ref = build_reference(data_dir, profile)
 
@@ -155,7 +170,7 @@ def generate(
         group = scored[slot * best_of: (slot + 1) * best_of]
         best_score, best_i = max(group)
         path = os.path.join(out_dir, f"gen_{slot + 1}.wav")
-        sf.write(path, waves[best_i], SAMPLE_RATE)
+        sf.write(path, waves[best_i], SAMPLE_RATE, subtype="PCM_24")
         rest = ", ".join(f"{s:.0f}" for s, _ in sorted(group, reverse=True)[1:])
         print(f"  {path}: score {best_score:.0f} (rejected: {rest})")
         paths.append(path)

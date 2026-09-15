@@ -44,6 +44,107 @@ def descriptor_matrix(specs, profile: InstrumentProfile) -> np.ndarray:
     return np.stack([descriptor_vector(s, profile) for s in specs])
 
 
+def descriptor_tensor(specs, profile: InstrumentProfile):
+    """Differentiable, batched equivalent of the profile's numpy descriptors.
+
+    Torch is imported here so corpus-only analysis remains lightweight.
+    """
+    import torch
+    from ..audio.constants import LOG_MEL_MAX, LOG_MEL_MIN, MS_PER_FRAME
+
+    arr = specs[:, 0] if specs.ndim == 4 else specs
+    energy = None
+    values = []
+    def region_mean(data, region):
+        return data[:, region.bands[0]:region.bands[1],
+                    region.frames[0]:region.frames[1]].mean(dim=(-2, -1))
+    for d in profile.descriptors:
+        if d.kind in ("power_db_ratio", "centroid_ms"):
+            if energy is None:
+                magnitude = (torch.exp(arr * (LOG_MEL_MAX - LOG_MEL_MIN) + LOG_MEL_MIN)
+                             - np.exp(LOG_MEL_MIN)).clamp_min(0)
+                energy = magnitude.square()
+            if d.kind == "centroid_ms":
+                a = energy[:, d.region.bands[0]:d.region.bands[1],
+                           d.region.frames[0]:d.region.frames[1]].sum(dim=1)
+                times = (torch.arange(a.shape[-1], device=arr.device, dtype=arr.dtype)
+                         + d.region.frames[0]) * MS_PER_FRAME
+                value = (a * times).sum(dim=-1) / (a.sum(dim=-1) + 1e-20)
+            else:
+                value = 10 * torch.log10((region_mean(energy, d.region) + 1e-20)
+                                        / (region_mean(energy, d.reference) + 1e-20))
+        else:
+            a = region_mean(arr, d.region)
+            if d.kind == "mean":
+                value = a
+            else:
+                b = region_mean(arr, d.reference)
+                if d.kind == "log_ratio":
+                    value = (torch.log((a / (b + 1e-8)).clamp_min(1e-8)) / d.scale).clamp(0, 1)
+                elif d.kind == "fraction":
+                    value = a / (a + b + 1e-8)
+                elif d.kind == "inverse_ratio":
+                    value = 1 - (a / (b + 1e-8)).clamp(0, 1)
+                else:
+                    raise ValueError(f"unknown descriptor kind {d.kind!r}")
+        values.append(value)
+    return torch.stack(values, dim=-1)
+
+
+class DecoderResponse:
+    """Measurements and exact local derivatives of the decoder's controls."""
+
+    def __init__(self, model, profile: InstrumentProfile):
+        self.model = model
+        self.profile = profile
+
+    def __call__(self, z: np.ndarray) -> np.ndarray:
+        import torch
+        device = next(self.model.parameters()).device
+        with torch.no_grad():
+            spec = self.model.decode(torch.as_tensor(z, dtype=torch.float32, device=device))
+            return descriptor_tensor(spec, self.profile).cpu().numpy().astype(np.float64)
+
+    def jacobian(self, z: np.ndarray) -> np.ndarray:
+        import torch
+        device = next(self.model.parameters()).device
+        with torch.enable_grad():
+            latent = torch.tensor(z, dtype=torch.float32, device=device, requires_grad=True)
+            d = descriptor_tensor(self.model.decode(latent), self.profile)
+            rows = [torch.autograd.grad(d[0, j], latent, retain_graph=j < d.shape[1] - 1)[0][0]
+                    for j in range(d.shape[1])]
+        return torch.stack(rows).detach().cpu().numpy().astype(np.float64)
+
+    def quality(self, z: np.ndarray, jacobian: bool = False):
+        """Excess low-end envelope rises after the transient (zero is one decay).
+
+        This constraint occupies unused latent dimensions instead of forcing
+        the user-facing descriptors to absorb a second, delayed body peak.
+        """
+        import torch
+        import torch.nn.functional as F
+        from ..audio.constants import HOP_LENGTH, LOG_MEL_MAX, LOG_MEL_MIN
+
+        if not self.profile.waveform_controls:
+            return None
+        device = next(self.model.parameters()).device
+        with torch.enable_grad():
+            latent = torch.tensor(z, dtype=torch.float32, device=device, requires_grad=jacobian)
+            spec = self.model.decode(latent)[:, 0]
+            region = next(d.region for d in self.profile.descriptors if d.kind == "centroid_ms")
+            magnitude = torch.exp(spec[:, region.bands[0]:region.bands[1]]
+                                  * (LOG_MEL_MAX - LOG_MEL_MIN) + LOG_MEL_MIN)
+            energy = magnitude.square().sum(dim=1)
+            width = max(3, self.profile.onsets.envelope_win // HOP_LENGTH | 1)
+            smooth = F.avg_pool1d(energy[:, None], width, stride=1, padding=width // 2)[:, 0]
+            start = self.profile.transient_loss.tail_start
+            rises = (smooth[:, start:] - smooth[:, start-1:-1]).clamp_min(0).sum(dim=-1)
+            value = rises / smooth.amax(dim=-1).clamp_min(1e-12)
+            if jacobian:
+                return torch.autograd.grad(value.sum(), latent)[0][0].detach().cpu().numpy()[None]
+        return value.detach().cpu().numpy().astype(np.float64)
+
+
 def descriptor_stats(matrix: np.ndarray, profile: InstrumentProfile) -> dict[str, dict[str, float]]:
     """Per-descriptor mean/std/min/max, keyed by descriptor."""
     return {

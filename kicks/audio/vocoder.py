@@ -66,7 +66,9 @@ def gate_tail(
         last = int(above[-1])
         end = min(last + fade, out.shape[-1])
         if end - last > 0:
-            ramp = 0.5 * (1 + torch.cos(torch.linspace(0, math.pi, end - last)))
+            ramp = 0.5 * (1 + torch.cos(torch.linspace(
+                0, math.pi, end - last, device=out.device, dtype=out.dtype,
+            )))
             out[i, last:end] *= ramp
         out[i, end:] = 0.0
     return out
@@ -74,12 +76,16 @@ def gate_tail(
 
 def _post_process(waveform: torch.Tensor) -> torch.Tensor:
     """Bandlimit, peak-normalize, gate the tail. Shared by both backends."""
+    dtype = waveform.dtype
+    # Low-cutoff biquads lose precision in float32; keep the CPU filter state
+    # in float64 so quiet and loud versions of a hit receive the same filter.
+    waveform = waveform.to(torch.float64)
     waveform = torchaudio.functional.highpass_biquad(
         waveform, SAMPLE_RATE, cutoff_freq=HIGHPASS_HZ)
     waveform = torchaudio.functional.lowpass_biquad(
         waveform, SAMPLE_RATE, cutoff_freq=LOWPASS_HZ)
-    waveform = waveform / (waveform.abs().max() + 1e-8)
-    return gate_tail(waveform)
+    waveform = waveform / waveform.abs().amax(dim=-1, keepdim=True).clamp_min(1e-8)
+    return gate_tail(waveform.to(dtype))
 
 
 # ---------------------------------------------------------------------------

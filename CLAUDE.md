@@ -92,6 +92,10 @@ Do not "tidy" those numbers.
   dataset and the latent prior both go through it.
 - **`mel.py`** — BigVGAN log-mel plus `normalize`/`denormalize`.
 - **`effects.py`** — envelope, drive, lowpass for the API's query params.
+- **`controls.py`** — `correct_waveform(waveform, targets, spans, profile)`:
+  bounded STFT gains (`profile.waveform_controls` masks) solved closed-loop
+  against the real vocoded waveform, applied before user effects to cancel
+  vocoder drift. Profiles opt in via `waveform_controls`.
 - **`vocoder.py`** — `load_vocoder(device, type, weights_dir)` and
   `spec_to_audio(spec, vocoder, device)`. Both backends share one post-chain:
   25 Hz highpass, 20 kHz lowpass, peak normalise, `gate_tail`.
@@ -115,6 +119,10 @@ size is a constructor argument so a short-tail instrument can use fewer frames.
   `profile.decorrelated_descriptor`; `basis="descriptor"` fits a `DescriptorBasis`
   with a closed-loop Newton `solve()`. `slider_positions_to_axis_values()` maps
   [0,1] positions into basis space and applies the decorrelation.
+- **`calibration.py`** — `fit_or_load_basis(...)` persists the fitted descriptor
+  basis plus its calibrated slider ranges to `<checkpoint>.controls.npz`
+  (arrays + JSON only, loaded with `allow_pickle=False`), fingerprinted on the
+  checkpoint bytes, profile and corpus. A restart reuses it; a mismatch refits.
 - **`evaluation.py`** — `analyze_hit(x, profile)`, `build_reference`,
   `reference_from_rows`, `score_sample`, `frechet_distance`, `run_eval`. numpy/
   scipy only. The reference cache is fingerprinted on the instrument *and* the
@@ -196,7 +204,10 @@ on Base UI (not Radix: composition is `render={<Link/>}`, not `asChild`).
 - **Spectrogram**: `(B, 1, 128, 256)`, values in [0, 1]
 - **VAE latent**: 32-dim µ by default (per-profile), logvar clamped to [-10, 10]
 - **Checkpoint**: `{"model": state_dict, "instrument": str, "latent_dim": int,
-  "n_mels": int, "n_frames": int, "epoch": int, "val_loss": float}`
+  "n_mels": int, "n_frames": int, "epoch": int, "val_loss": float}`. A descriptor
+  control basis adds a `<checkpoint>.controls.npz` sidecar (fitted basis +
+  calibrated slider ranges, fingerprinted on checkpoint + corpus); keep the two
+  together when promoting or copying a model.
 - **Slider count** follows `profile.n_sliders` (one per descriptor) — never
   assume 5
 - **Slider query params**: `s1..sN`, legacy `pc1..pcN`, or the slider's own
@@ -209,6 +220,8 @@ on Base UI (not Radix: composition is `render={<Link/>}`, not `asChild`).
 - **Static-export routes** end in `/` (`trailingSlash: true`); link to `/studio/`,
   not `/studio`
 - **Vocoder selection**: `KICKS_VOCODER=griffinlim` or `--griffin-lim`
+- **Control basis**: `KICKS_CONTROL=descriptor|pca` or `--control ...`, default
+  `descriptor` (closed-loop descriptor solve; PCA remains available as fallback)
 
 ## Important gotchas
 

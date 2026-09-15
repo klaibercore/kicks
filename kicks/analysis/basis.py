@@ -23,7 +23,7 @@ import numpy as np
 from sklearn.decomposition import PCA
 
 from ..instruments import InstrumentProfile
-from .descriptors import correlation_matrix, descriptor_matrix
+from .descriptors import DecoderResponse, correlation_matrix, descriptor_matrix
 
 #: Minimum |r| before a principal component is named after a descriptor.
 NAMING_THRESHOLD = 0.15
@@ -40,6 +40,7 @@ class SliderBasis:
     maxs: list[float]                # 98th percentile per axis
     decorrelate_idx: int | None = None        # axis that absorbs cross-talk
     decorrelate_ratios: np.ndarray | None = None   # per-axis compensation ratios
+    calibration: dict | None = None
 
     @property
     def n_sliders(self) -> int:
@@ -64,15 +65,34 @@ class DescriptorBasis:
     """
 
     def __init__(self, latents: np.ndarray, desc_matrix: np.ndarray):
+        if len(latents) < 2 or len(latents) != len(desc_matrix):
+            raise ValueError("basis fitting needs matching latents and descriptors for at least two samples")
         self.mean_z = latents.mean(axis=0)
         self.d_means = desc_matrix.mean(axis=0)
         Zc = latents - self.mean_z
         Dc = desc_matrix - self.d_means
-        W, *_ = np.linalg.lstsq(Zc, Dc, rcond=None)     # (latent_dim, n_desc)
-        self.W = W
-        self.axes = W @ np.linalg.inv(W.T @ W + 1e-6 * np.eye(W.shape[1]))
+        # Optimize in corpus-standardized coordinates, retaining 99.5% of
+        # variance. Tiny, poorly supported latent directions must not become
+        # enormous inverse-regression steps.
+        _, singular, vt = np.linalg.svd(Zc, full_matrices=False)
+        variance = singular ** 2
+        if variance.sum() <= 1e-12:
+            raise ValueError("cannot fit controls to collapsed latents")
+        rank = int(np.searchsorted(np.cumsum(variance) / variance.sum(), 0.995)) + 1
+        rank = min(max(rank, desc_matrix.shape[1]), int((singular > singular[0] * 1e-6).sum()))
+        self.transform = vt[:rank].T * (singular[:rank] / np.sqrt(len(latents) - 1))
+        self.transform_inverse = np.linalg.pinv(self.transform)
+        coordinates = Zc @ self.transform_inverse.T
+        self.lower, self.upper = np.percentile(coordinates, [0.5, 99.5], axis=0)
+        self.radius = float(np.percentile(np.linalg.norm(coordinates, axis=1), 99))
+        self.d_scale = np.maximum(np.percentile(desc_matrix, 98, axis=0)
+                                  - np.percentile(desc_matrix, 2, axis=0), 1e-6)
+        W, *_ = np.linalg.lstsq(coordinates, Dc / self.d_scale, rcond=1e-5)
+        self.axes = self.transform @ np.linalg.pinv(W, rcond=1e-5).T / self.d_scale
+        self.W = self.transform_inverse.T @ (W * self.d_scale)
+        self.anchor = np.zeros(rank)
         # Fit quality per descriptor (R²) — how linearly controllable each is.
-        pred = Zc @ W
+        pred = coordinates @ W * self.d_scale
         ss_res = ((Dc - pred) ** 2).sum(axis=0)
         ss_tot = (Dc ** 2).sum(axis=0) + 1e-12
         self.r2 = 1.0 - ss_res / ss_tot
@@ -82,24 +102,72 @@ class DescriptorBasis:
         X = np.asarray(X, dtype=np.float64)
         return self.mean_z + (X - self.d_means) @ self.axes.T
 
-    def solve(self, targets, measure_fn=None, n_iter: int = 2) -> np.ndarray:
-        """Latent (1, latent_dim) hitting the descriptor targets.
+    def solve(self, targets, measure_fn=None, n_iter: int = 32) -> np.ndarray:
+        """Bounded nonlinear least squares using the decoder's local Jacobian.
 
-        With a ``measure_fn`` (latents (1, dim) -> measured descriptors of the
-        *decoded* spectrogram), runs closed-loop Newton correction: decode,
-        measure, step along the axes toward the residual. Measured on the kick
-        model this roughly doubles slider authority versus the open-loop map
-        (~30% -> ~64% of the corpus descriptor span), because the decoder's
-        response is nonlinear away from the corpus mean.
+        All residuals are scaled by their measured corpus ranges. The trust
+        region and coordinate bounds limit extrapolation beyond the corpus.
+        ``DecoderResponse`` supplies exact derivatives; plain measurement
+        callables remain supported through finite differences.
         """
+        from scipy.optimize import least_squares
+
         t = np.asarray(targets, dtype=np.float64)
-        z = self.inverse_transform(t[None])
+        if t.shape != self.d_means.shape or not np.isfinite(t).all():
+            raise ValueError("descriptor targets must be finite and match the descriptor count")
         if measure_fn is None:
-            return z
-        for _ in range(n_iter):
-            d = np.asarray(measure_fn(z), dtype=np.float64)
-            z = z + ((t - d) @ self.axes.T)[None, :]
-        return z
+            return self.inverse_transform(t[None])
+
+        def latent(x):
+            return (self.mean_z + self.transform @ x)[None]
+
+        def residual(x):
+            d = np.asarray(measure_fn(latent(x))).reshape(-1)
+            # A ball in whitened coordinates enforces joint support, in
+            # addition to the independent empirical coordinate bounds.
+            penalty = max(0.0, np.linalg.norm(x) - self.radius)
+            quality = measure_fn.quality(latent(x)) if hasattr(measure_fn, "quality") else None
+            return np.r_[(d - t) / self.d_scale, [] if quality is None else quality, penalty]
+
+        def jacobian(x):
+            if hasattr(measure_fn, "jacobian"):
+                J = measure_fn.jacobian(latent(x)) @ self.transform / self.d_scale[:, None]
+            else:
+                eps = 0.01
+                J = np.column_stack([
+                    (np.asarray(measure_fn(latent(x + eps * e))).reshape(-1)
+                     - np.asarray(measure_fn(latent(x - eps * e))).reshape(-1))
+                    / (2 * eps * self.d_scale)
+                    for e in np.eye(len(x))
+                ])
+            norm = np.linalg.norm(x)
+            if hasattr(measure_fn, "quality"):
+                quality_jac = measure_fn.quality(latent(x), jacobian=True)
+                if quality_jac is not None:
+                    J = np.vstack([J, quality_jac @ self.transform])
+            return np.vstack([J, x / norm if norm > self.radius else np.zeros_like(x)])
+
+        result = least_squares(
+            residual, np.clip(self.anchor, self.lower, self.upper), jac=jacobian,
+            bounds=(self.lower, self.upper), method="trf", tr_solver="lsmr",
+            max_nfev=n_iter, ftol=1e-5, xtol=1e-5, gtol=1e-5,
+        )
+        # A single start can get trapped behind an envelope ridge even when
+        # the requested sound is feasible. Try deterministic regression starts
+        # only when the first solve misses its targets.
+        if np.max(np.abs(result.fun)) > 0.002:
+            linear = ((self.inverse_transform(t[None]) - self.mean_z) @ self.transform_inverse.T)[0]
+            for initial in ((self.anchor + linear) / 2, linear):
+                alternative = least_squares(
+                    residual, np.clip(initial, self.lower, self.upper), jac=jacobian,
+                    bounds=(self.lower, self.upper), method="trf", tr_solver="lsmr",
+                    max_nfev=n_iter, ftol=1e-5, xtol=1e-5, gtol=1e-5,
+                )
+                if np.max(np.abs(alternative.fun)) < np.max(np.abs(result.fun)):
+                    result = alternative
+                if np.max(np.abs(result.fun)) <= 0.002:
+                    break
+        return latent(result.x)
 
 
 def _decoded_descriptors(
@@ -152,13 +220,62 @@ def _fit_descriptor_basis(
         print(f"Descriptor basis fit R²: {r2s}")
 
     mins, maxs = _percentile_range(D)
+    calibration = None
+    if model is not None:
+        mins, maxs, calibration = _calibrate_ranges(basis, DecoderResponse(model, profile), D)
+        if verbose:
+            print(f"Calibrated controls: {calibration['range_fraction']:.0%} of corpus range, "
+                  f"max tested error {calibration['max_error']:.3%}")
     return SliderBasis(
         basis=basis,
         projected=D,
         names=profile.descriptor_labels,
         mins=mins,
         maxs=maxs,
+        calibration=calibration,
     )
+
+
+def _calibrate_ranges(basis: DescriptorBasis, response, descriptors: np.ndarray):
+    """Find a jointly reachable box, checking corners and independent interior points.
+
+    Endpoints derive from the loaded decoder, not a hardcoded latent multiplier.
+    Errors are fractions of the proposed slider's travel, not raw mixed units.
+    """
+    import itertools
+
+    lo, hi = np.percentile(descriptors, [2, 98], axis=0)
+    centre = (lo + hi) / 2
+    centre_z = basis.solve(centre, response)
+    basis.anchor = ((centre_z - basis.mean_z) @ basis.transform_inverse.T)[0]
+    dims = len(centre)
+    corners = np.array(list(itertools.product((-0.5, 0.5), repeat=dims)))
+    interior = np.random.default_rng(917).uniform(-0.5, 0.5, size=(16, dims))
+    probes = np.vstack([np.zeros(dims), corners, interior])
+    tolerance = 0.01  # at most one UI step of error in every descriptor
+    attempts = []
+    for fraction in (1.0, 0.8, 0.64, 0.512, 0.4096, 0.32768, 0.262144):
+        span = (hi - lo) * fraction
+        errors = []
+        for point in probes:
+            target = centre + point * span
+            z = basis.solve(target, response)
+            error = float(np.max(np.abs(np.asarray(response(z)).reshape(-1) - target)
+                                  / np.maximum(span, 1e-6)))
+            quality = response.quality(z) if hasattr(response, "quality") else None
+            errors.append(max(error, float(np.max(quality)) if quality is not None else 0.0))
+            if errors[-1] > tolerance:
+                break
+        worst = max(errors)
+        print(f"  Range {fraction:.1%}: worst control/envelope error {worst:.3%}", flush=True)
+        attempts.append({"range_fraction": fraction, "max_error": worst, "probes": len(errors)})
+        if worst <= tolerance:
+            return (centre - span / 2).tolist(), (centre + span / 2).tolist(), {
+                "version": 1, "range_fraction": fraction, "max_error": worst,
+                "tolerance": tolerance, "probes": len(probes), "attempts": attempts,
+                "scope": "decoded_spectrogram", "corpus_min": lo.tolist(), "corpus_max": hi.tolist(),
+            }
+    raise RuntimeError("The decoder cannot support independent controls within 1% error; retrain or use PCA")
 
 
 def _name_components(

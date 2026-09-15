@@ -33,7 +33,9 @@ def log_mel(audio: torch.Tensor, n_frames: int = N_FRAMES) -> torch.Tensor:
     if spec.shape[-1] > n_frames:
         return spec[..., :n_frames]
     if spec.shape[-1] < n_frames:
-        return torch.nn.functional.pad(spec, (0, n_frames - spec.shape[-1]))
+        return torch.nn.functional.pad(
+            spec, (0, n_frames - spec.shape[-1]), value=LOG_MEL_MIN,
+        )
     return spec
 
 

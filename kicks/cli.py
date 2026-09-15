@@ -62,6 +62,10 @@ def train(
     batch_size: int = typer.Option(32, "--batch-size", "-b", help="Batch size"),
     transient_weight: float = typer.Option(None, "--transient-weight", help="Override the profile's transient-fidelity loss weight (0 = off)"),
     preview: int = typer.Option(10, "--preview", help="Reconstructions and samples to render after training (0 = skip)"),
+    resume: str = typer.Option(None, "--resume", help="Fine-tune this checkpoint with a fresh optimizer"),
+    learning_rate: float = typer.Option(None, "--learning-rate", help="Defaults to 1e-4 for fine-tuning, 1e-3 for a new model"),
+    model_dir: str = typer.Option(None, "--model-dir", help="Output model root (use a separate directory for candidate weights)"),
+    seed: int = typer.Option(42, "--seed", help="Reproducible training and validation split"),
 ) -> None:
     """Train the VAE for one instrument."""
     import os
@@ -74,52 +78,68 @@ def train(
 
     from kicks.audio.constants import SAMPLE_RATE
     from kicks.audio.vocoder import load_vocoder, spec_to_audio
-    from kicks.config import get_device
+    from kicks.config import get_device, load_vae_from_checkpoint
     from kicks.data import DrumDataset
     from kicks.instruments import get_profile
     from kicks.nn import VAE
     from kicks.training import train as train_loop
 
+    if model_dir:
+        os.environ["KICKS_MODEL_DIR"] = model_dir
+    if epochs < 1 or batch_size < 1:
+        raise typer.BadParameter("epochs and batch size must be positive")
+    torch.manual_seed(seed)
     profile = get_profile(instrument)
     data = data or profile.paths.data_dir
     latent_dim = latent_dim or profile.latent_dim
     os.makedirs(profile.paths.model_dir or ".", exist_ok=True)
     os.makedirs(profile.paths.output_dir or ".", exist_ok=True)
 
-    dataset = DrumDataset(data, profile)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-
     device = get_device()
-    model = VAE(latent_dim=latent_dim)
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    model = (load_vae_from_checkpoint(resume, device)[0] if resume
+             else VAE(latent_dim=latent_dim).to(device))
+    dataset = DrumDataset(data, profile, n_frames=model.n_frames)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    lr = learning_rate if learning_rate is not None else (1e-4 if resume else 1e-3)
+    if lr <= 0:
+        raise typer.BadParameter("learning rate must be positive")
+    optimizer = optim.Adam(model.parameters(), lr=lr)
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
 
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Model: {n_params:,} parameters, latent_dim={latent_dim}, device={device}")
+    print(f"Model: {n_params:,} parameters, latent_dim={model.latent_dim}, device={device}")
 
     train_loop(
         model, dataloader, optimizer, profile,
         epochs=epochs, device=device,
         beta=beta, free_bits=free_bits,
-        beta_anneal_epochs=epochs, beta_cycles=beta_cycles,
+        beta_anneal_epochs=0 if resume else epochs, beta_cycles=beta_cycles,
         scheduler=scheduler, transient_weight=transient_weight,
+        seed=seed, source_checkpoint=resume,
     )
 
     if preview > 0:
+        import numpy as np
+        from kicks.synthesis.generator import fit_latent_prior
+
         out_dir = profile.paths.output_dir
         vocoder = load_vocoder(device, weights_dir=profile.paths.vocoder_dir)
-        model.eval()
+        model, _ = load_vae_from_checkpoint(profile.paths.checkpoint, device)
+        prior = fit_latent_prior(model, device, data, profile.paths.latent_prior)
+        prior.random_state = np.random.RandomState(seed)
+        preview_latents, _ = prior.sample(preview)
         with torch.no_grad():
             for i in range(min(preview * 2, len(dataset))):
-                recon, _, _ = model(dataset[i].unsqueeze(0).to(device))
+                mu, _ = model.encode(dataset[i].unsqueeze(0).to(device))
+                recon = model.decode(mu)
                 audio = spec_to_audio(recon, vocoder, device)
                 path = os.path.join(out_dir, f"recon_{i + 1}.wav")
-                sf.write(path, audio.squeeze(0).numpy(), SAMPLE_RATE)
+                sf.write(path, audio.squeeze(0).numpy(), SAMPLE_RATE, subtype="PCM_24")
             for i in range(preview):
-                spec = model.decode(torch.randn(1, latent_dim).to(device))
+                spec = model.decode(torch.tensor(preview_latents[i:i+1], dtype=torch.float32, device=device))
                 audio = spec_to_audio(spec, vocoder, device)
                 path = os.path.join(out_dir, f"gen_{i + 1}.wav")
-                sf.write(path, audio.squeeze(0).numpy(), SAMPLE_RATE)
+                sf.write(path, audio.squeeze(0).numpy(), SAMPLE_RATE, subtype="PCM_24")
         print(f"Wrote reconstructions and samples to {out_dir}/")
 
     print("Done!")
@@ -132,7 +152,7 @@ def serve(
     host: str = typer.Option("0.0.0.0", "--host", help="API host"),
     data: str = typer.Option(None, "--data", "-d", help="Override the corpus root directory"),
     griffin_lim: bool = typer.Option(False, "--griffin-lim", help="Use Griffin-Lim instead of BigVGAN (lower quality, no GPU needed)"),
-    control: str = typer.Option("pca", "--control", help="Slider basis: 'pca' (unsupervised) or 'descriptor' (each slider targets one descriptor)"),
+    control: str = typer.Option(None, "--control", help="Slider basis: 'descriptor' (default) or 'pca'"),
     reload: bool = typer.Option(False, "--reload", help="Auto-reload on code changes (development)"),
 ) -> None:
     """Start the REST API (the website in web/ is its client)."""
@@ -144,6 +164,9 @@ def serve(
 
     profile = get_profile(instrument)
     os.environ["KICKS_INSTRUMENT"] = profile.name
+    control = control or os.environ.get("KICKS_CONTROL", "descriptor")
+    if control not in ("pca", "descriptor"):
+        raise typer.BadParameter("control must be 'descriptor' or 'pca'")
     os.environ["KICKS_CONTROL"] = control
     if data:
         os.environ["KICKS_DATA_DIR"] = data

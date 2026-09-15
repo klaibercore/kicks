@@ -22,6 +22,9 @@ export interface SliderDef {
   max: number;
   default: number;
   step: number;
+  description?: string;
+  target_min?: number;
+  target_max?: number;
 }
 
 export interface InstrumentConfig {

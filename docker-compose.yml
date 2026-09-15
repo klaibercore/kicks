@@ -16,7 +16,7 @@ services:
       - KICKS_MODEL_DIR=/app/models
       - KICKS_OUTPUT_DIR=/app/output
       - KICKS_VOCODER=bigvgan
-      - KICKS_CONTROL=pca
+      - KICKS_CONTROL=descriptor
       # Origins the website is served from (local dev, GitHub Pages, custom domain).
       - KICKS_CORS_ORIGINS=http://localhost:3000
       # Accounts and credits. Leave unset for an open, local-only server.

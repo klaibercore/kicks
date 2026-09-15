@@ -1,11 +1,4 @@
-"""Kick drum profile.
-
-The reference instrument: the descriptor windows, strip heuristics and metric
-weights here are the ones the project's corpus and trained checkpoint were
-tuned against, so they are kept exactly as they were before the pipeline became
-instrument-agnostic. Its paths use the original flat layout
-(``data/kicks``, ``models/vae_best.pth``) so existing artefacts keep working.
-"""
+"""Kick profile with gain-invariant, audible-band control measurements."""
 
 from .metrics import standard_metrics
 from .profile import (
@@ -18,39 +11,39 @@ from .profile import (
     TransientLossSpec,
 )
 
-# Frames are ~5.8 ms. Frames 0-3 are the transient; most descriptors start at
-# frame 3 because the transient's frame-to-frame variance is large enough to
-# swamp a body measurement.
+# BigVGAN's Slaney mel centres: bands 0:6 = 31-186 Hz, 6:32 =
+# 217-992 Hz, 53:97 = 2.00-7.93 kHz, 53:118 = 2.00-15.53 kHz.
+# Four frames are 23.2 ms; frame 14 is 81.3 ms. Fixed short windows keep
+# level controls from implicitly measuring the length of the entire hit.
 DESCRIPTORS = (
     DescriptorSpec(
-        "sub", "Sub", "mean",
-        region=Region(bands=(0, 12), frames=(3, None)),
-        doc="Sustained low-end weight (below ~400 Hz), transient excluded.",
+        "sub", "Sub", "power_db_ratio",
+        region=Region(bands=(0, 6), frames=(4, 14)),
+        reference=Region(bands=(6, 32), frames=(4, 14)),
+        doc="Low-end weight below 200 Hz relative to the 200 Hz–1 kHz body.",
     ),
     DescriptorSpec(
-        "punch", "Punch", "log_ratio",
-        region=Region(bands=(10, 30), frames=(0, 3)),
-        reference=Region(bands=(10, 30), frames=(3, 30)),
-        scale=2.0,
-        doc="Attack-to-body contrast in the 345 Hz - 950 Hz range.",
+        "punch", "Punch", "power_db_ratio",
+        region=Region(bands=(0, 32), frames=(0, 4)),
+        reference=Region(bands=(0, 32), frames=(4, 14)),
+        doc="Low-frequency attack-to-body contrast. Higher means a harder initial hit.",
     ),
     DescriptorSpec(
-        "click", "Click", "mean",
-        region=Region(bands=(40, 100), frames=(0, 3)),
-        doc="High-frequency energy in the first ~17 ms — the beater click.",
+        "click", "Click", "power_db_ratio",
+        region=Region(bands=(53, 118), frames=(0, 4)),
+        reference=Region(bands=(0, 32), frames=(0, 4)),
+        doc="Beater click at 2–16 kHz relative to the low-frequency attack.",
     ),
     DescriptorSpec(
-        "bright", "Bright", "fraction",
-        region=Region(bands=(50, None), frames=(3, None)),
-        reference=Region(bands=(0, 30), frames=(3, None)),
-        doc="Share of body energy above ~1.8 kHz.",
+        "bright", "Bright", "power_db_ratio",
+        region=Region(bands=(53, 97), frames=(4, 14)),
+        reference=Region(bands=(6, 32), frames=(4, 14)),
+        doc="Body brightness at 2–8 kHz, after the initial beater click.",
     ),
     DescriptorSpec(
-        "decay", "Decay", "inverse_ratio",
-        region=Region(bands=(0, 40), frames=(30, 120)),
-        reference=Region(bands=(0, 40), frames=(3, 30)),
-        doc="Broadband early-to-late energy ratio. Higher = faster decay "
-            "(acoustic thump), lower = long sustain (808-style).",
+        "decay", "Decay", "centroid_ms",
+        region=Region(bands=(0, 6), frames=(0, None)),
+        doc="Energy-weighted low-end duration in milliseconds. Higher means longer sustain.",
     ),
 )
 
@@ -84,4 +77,5 @@ PROFILE = InstrumentProfile(
     hf_band=(2000.0, 16000.0),
     fundamental_band=(25.0, 150.0),
     latent_dim=32,
+    waveform_controls=True,
 )

@@ -30,7 +30,7 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader, random_split
 
-from ..analysis.descriptors import descriptor_matrix, descriptor_vector
+from ..analysis.descriptors import descriptor_matrix
 from ..instruments import InstrumentProfile
 from ..nn import VAE
 from .loss import vae_loss
@@ -65,15 +65,15 @@ def _eval_proxy_score(
     mean = mu_all.mean(dim=0)
     cov = torch.cov(mu_all.T) + 1e-4 * torch.eye(mu_all.shape[1], device=mu_all.device)
     chol = torch.linalg.cholesky(cov)
-    eps = torch.randn(n_samples, mu_all.shape[1], device=mu_all.device)
+    generator = torch.Generator(device=mu_all.device).manual_seed(0)
+    eps = torch.randn(n_samples, mu_all.shape[1], device=mu_all.device, generator=generator)
     z = mean + eps @ chol.T
     with torch.no_grad():
         specs = model.decode(z.to(device)).cpu()
-    scores = [
-        np.abs((descriptor_vector(specs[i], profile) - desc_mean) / desc_std).mean()
-        for i in range(n_samples)
-    ]
-    return float(np.mean(scores))
+    standardized = (descriptor_matrix(specs, profile) - desc_mean) / desc_std
+    # Match spread as well as location. Mean absolute sample z-score rewards
+    # emitting the same average hit every time (complete loss of diversity).
+    return float(np.mean(standardized.mean(0) ** 2 + (standardized.std(0) - 1) ** 2))
 
 
 def _cyclical_beta(epoch: int, beta: float, anneal_epochs: int, cycles: int) -> float:
@@ -103,6 +103,8 @@ def train(
     scheduler: LRScheduler | None = None,
     transient_weight: float | None = None,
     eval_every: int = 5,
+    seed: int = 42,
+    source_checkpoint: str | None = None,
 ) -> dict[str, list[float]]:
     """Train the VAE. Returns per-epoch average loss, recon and kl."""
     paths = profile.paths
@@ -114,14 +116,19 @@ def train(
     model.to(device)
 
     dataset = dloader.dataset
-    n_val = int(len(dataset) * val_split)
-    train_set, val_set = random_split(dataset, [len(dataset) - n_val, n_val])
-    train_loader = DataLoader(train_set, batch_size=dloader.batch_size, shuffle=True)
+    if len(dataset) < 2 or not 0 < val_split < 1:
+        raise ValueError("training needs at least two samples and a validation split in (0, 1)")
+    n_val = max(1, min(len(dataset) - 1, int(len(dataset) * val_split)))
+    train_set, val_set = random_split(
+        dataset, [len(dataset) - n_val, n_val], generator=torch.Generator().manual_seed(seed),
+    )
+    train_loader = DataLoader(train_set, batch_size=dloader.batch_size, shuffle=True,
+                              generator=torch.Generator().manual_seed(seed))
     val_loader = DataLoader(val_set, batch_size=dloader.batch_size, shuffle=False)
 
     best_val_loss = float("inf")
     best_proxy = float("inf")
-    desc_mean, desc_std = _corpus_descriptor_stats(dataset, profile)
+    desc_mean, desc_std = _corpus_descriptor_stats(train_set, profile)
 
     def _loss(recon, data, mu, logvar, b):
         return vae_loss(
@@ -131,7 +138,33 @@ def train(
 
     def _save(path: str, **extra) -> None:
         torch.save({"model": model.state_dict(), "instrument": profile.name,
+                    "training": {"seed": seed, "beta": beta, "free_bits": free_bits,
+                                 "source_checkpoint": source_checkpoint,
+                                 "preprocessing": "peak_safe_lufs_v1",
+                                 "validation": "posterior_mean_fixed_beta_v1"},
                     **model.checkpoint_meta(), **extra}, path)
+
+    def _validate():
+        model.eval()
+        total, count, mus, logvars = 0.0, 0, [], []
+        with torch.no_grad():
+            for data in val_loader:
+                data = data.to(device)
+                mu, logvar = model.encode(data)
+                # Compare every epoch with the same objective and the same
+                # posterior means. Annealed beta and random validation draws
+                # previously made "best" checkpoints incomparable.
+                vl, _, _ = _loss(model.decode(mu), data, mu, logvar, beta)
+                total += vl.item() * len(data)
+                count += len(data)
+                mus.append(mu)
+                logvars.append(logvar)
+        return total / count, mus, logvars
+
+    if source_checkpoint is not None:
+        best_val_loss, _, _ = _validate()
+        _save(paths.checkpoint, epoch=0, val_loss=best_val_loss)
+        print(f"Fine-tune baseline validation: {best_val_loss:.6f}", flush=True)
 
     with Progress(
         TextColumn("[bold blue]Epoch {task.fields[epoch]}"),
@@ -172,17 +205,7 @@ def train(
             progress.update(task, advance=1, epoch=epoch + 1,
                             loss=avg_loss, recon=avg_recon, kl=avg_kl)
 
-            model.eval()
-            val_losses, mus, logvars = [], [], []
-            with torch.no_grad():
-                for data in val_loader:
-                    data = data.to(device)
-                    recon, mu, logvar = model(data)
-                    vl, _, _ = _loss(recon, data, mu, logvar, current_beta)
-                    val_losses.append(vl.item())
-                    mus.append(mu)
-                    logvars.append(logvar)
-            val_loss = avg(val_losses)
+            val_loss, mus, logvars = _validate()
 
             # Latent diagnostics: per-dim KL over the validation set says how many
             # dimensions actually carry information versus collapsing to the

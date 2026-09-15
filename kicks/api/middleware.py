@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections import OrderedDict
+from typing import Generic, TypeVar
 
 from fastapi import HTTPException
 
@@ -31,7 +32,10 @@ class RateLimiter:
         self._tokens -= 1.0
 
 
-class LRUCache:
+T = TypeVar("T")
+
+
+class LRUCache(Generic[T]):
     """Fixed-size LRU cache of rendered audio, keyed by query string.
 
     Slider UIs re-request the same settings constantly (A/B-ing two positions,
@@ -41,15 +45,15 @@ class LRUCache:
 
     def __init__(self, max_size: int = 100):
         self._max_size = max_size
-        self._store: OrderedDict[str, bytes] = OrderedDict()
+        self._store: OrderedDict[str, T] = OrderedDict()
 
-    def get(self, key: str) -> bytes | None:
+    def get(self, key: str) -> T | None:
         if key not in self._store:
             return None
         self._store.move_to_end(key)
         return self._store[key]
 
-    def put(self, key: str, value: bytes) -> None:
+    def put(self, key: str, value: T) -> None:
         if key in self._store:
             self._store.move_to_end(key)
         elif len(self._store) >= self._max_size:

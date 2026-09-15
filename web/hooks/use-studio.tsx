@@ -87,6 +87,9 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   const [spectrogram, setSpectrogram] = useState<Spectrogram | null>(null);
   const [exporting, setExporting] = useState(false);
   const renderSeq = useRef(0);
+  // Event handlers can update and audition in the same tick (reset buttons,
+  // effect switches). Keep that pending sound available before React renders.
+  const pendingSound = useRef<Sound | null>(null);
 
   // Discover instruments once the API answers.
   useEffect(() => {
@@ -146,11 +149,12 @@ export function StudioProvider({ children }: { children: ReactNode }) {
 
   const preview = useCallback(
     async (play = true) => {
-      if (!sound) return null;
+      const target = pendingSound.current ?? sound;
+      if (!target) return null;
       const seq = ++renderSeq.current;
       setRendering(true);
       try {
-        const decoded = await bufferFor(sound);
+        const decoded = await bufferFor(target);
         if (seq !== renderSeq.current) return decoded; // a newer render superseded this one
         setBuffer(decoded);
         if (play) engine.play(decoded);
@@ -174,11 +178,17 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   const update = useCallback(
     (fn: (s: Sound) => Sound) => {
       if (!active) return;
-      setSounds((all) => (all[active] ? { ...all, [active]: fn(all[active]) } : all));
+      const current = pendingSound.current ?? sound;
+      if (!current) return;
+      const next = fn(current);
+      pendingSound.current = next;
+      ++renderSeq.current;
+      setRendering(false);
+      setSounds((all) => ({ ...all, [active]: next }));
       setEvaluation(null);
       setSpectrogram(null);
     },
-    [active],
+    [active, sound],
   );
 
   const setSlider = useCallback(
@@ -211,6 +221,9 @@ export function StudioProvider({ children }: { children: ReactNode }) {
 
   const loadSound = useCallback(
     (next: Sound) => {
+      pendingSound.current = next;
+      ++renderSeq.current;
+      setRendering(false);
       setActiveState(next.instrument);
       setSounds((all) => ({ ...all, [next.instrument]: next }));
       setEvaluation(null);
@@ -225,9 +238,11 @@ export function StudioProvider({ children }: { children: ReactNode }) {
 
   const evaluate = useCallback(async () => {
     if (!sound) return;
+    const seq = renderSeq.current;
     setEvaluating(true);
     try {
-      setEvaluation(await api.evaluate(sound));
+      const result = await api.evaluate(pendingSound.current ?? sound);
+      if (seq === renderSeq.current) setEvaluation(result);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Evaluation failed.");
     } finally {
@@ -237,8 +252,10 @@ export function StudioProvider({ children }: { children: ReactNode }) {
 
   const loadSpectrogram = useCallback(async () => {
     if (!sound) return;
+    const seq = renderSeq.current;
     try {
-      setSpectrogram(await api.spectrogram(sound));
+      const result = await api.spectrogram(pendingSound.current ?? sound);
+      if (seq === renderSeq.current) setSpectrogram(result);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not load the spectrogram.");
     }
@@ -281,6 +298,9 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   }, [api, sound, authEnabled, user, refreshCredits]);
 
   const setActive = useCallback((name: string) => {
+    pendingSound.current = null;
+    ++renderSeq.current;
+    setRendering(false);
     setActiveState(name);
     setEvaluation(null);
     setSpectrogram(null);

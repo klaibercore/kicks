@@ -26,7 +26,7 @@ export function SliderRack() {
                 >
                   {def.name}
                 </TooltipTrigger>
-                <TooltipContent side="right">Slider {def.id} · query key <code>{def.key}</code></TooltipContent>
+                <TooltipContent side="right">{def.description ?? def.name}</TooltipContent>
               </Tooltip>
               <button
                 type="button"
