@@ -15,7 +15,7 @@ import numpy as np
 from .basis import DescriptorBasis, SliderBasis, analyze_latent_space
 from .latents import extract_latents
 
-CALIBRATION_VERSION = 2
+CALIBRATION_VERSION = 3
 _ARRAYS = ("mean_z", "d_means", "transform", "transform_inverse", "lower", "upper",
            "d_scale", "axes", "W", "anchor", "r2")
 

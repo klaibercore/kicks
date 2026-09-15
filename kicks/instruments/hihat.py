@@ -24,35 +24,43 @@ from .profile import (
     TransientLossSpec,
 )
 
+# BigVGAN's Slaney mel centres: bands 32:72 = 1.02-3.68 kHz, 60:116 =
+# 2.51-11.6 kHz, 72:96 = 3.68-7.93 kHz, 96: = 7.93-21 kHz.
+# Two frames are 11.6 ms; frame 8 is 46 ms, frame 24 is 139 ms — hat windows
+# run roughly a quarter of a kick's, since a closed hat is over in ~60 ms.
 DESCRIPTORS = (
     DescriptorSpec(
-        "attack", "Attack", "mean",
-        region=Region(bands=(60, 110), frames=(0, 2)),
-        doc="Stick contact energy, ~2.5-12 kHz, first ~12 ms.",
+        "attack", "Attack", "power_db_ratio",
+        region=Region(bands=(60, 116), frames=(0, 2)),
+        reference=Region(bands=(60, 116), frames=(2, 8)),
+        doc="Stick contact spike at 2.5-12 kHz versus its first ~35 ms. "
+            "Higher means a crisper hit.",
     ),
     DescriptorSpec(
-        "body", "Body", "mean",
-        region=Region(bands=(30, 70), frames=(2, None)),
-        doc="Lower shimmer around ~950 Hz - 3.5 kHz — how much metal is heard "
-            "rather than pure hiss.",
+        "body", "Body", "power_db_ratio",
+        region=Region(bands=(32, 72), frames=(2, 8)),
+        reference=Region(bands=(72, 96), frames=(2, 8)),
+        doc="Lower shimmer at 1-3.7 kHz against the 3.7-7.9 kHz hiss — "
+            "how much metal is heard rather than pure air.",
     ),
     DescriptorSpec(
-        "sizzle", "Sizzle", "mean",
-        region=Region(bands=(95, None), frames=(2, None)),
-        doc="Air and sizzle above ~7.7 kHz, transient excluded.",
+        "sizzle", "Sizzle", "power_db_ratio",
+        region=Region(bands=(96, None), frames=(8, 24)),
+        reference=Region(bands=(96, None), frames=(0, 8)),
+        doc="Air and sizzle above ~7.7 kHz sustaining past the hit relative to "
+            "the hit itself. High = open, airy tail; low = dry tick.",
     ),
     DescriptorSpec(
-        "bright", "Bright", "fraction",
-        region=Region(bands=(90, None), frames=(2, None)),
-        reference=Region(bands=(30, 70), frames=(2, None)),
-        doc="Balance of top-end sizzle against lower shimmer.",
+        "bright", "Bright", "power_db_ratio",
+        region=Region(bands=(96, None), frames=(2, 8)),
+        reference=Region(bands=(32, 72), frames=(2, 8)),
+        doc="Top-end sizzle against lower shimmer over the first ~46 ms.",
     ),
     DescriptorSpec(
-        "decay", "Decay", "inverse_ratio",
-        region=Region(bands=(40, 115), frames=(10, 44)),
-        reference=Region(bands=(40, 115), frames=(2, 10)),
-        doc="Early-to-late energy ratio over ~12-255 ms — the closed/open axis. "
-            "Higher = tightly closed, lower = open or pedal-splashed.",
+        "decay", "Decay", "centroid_ms",
+        region=Region(bands=(32, None), frames=(0, None)),
+        doc="Energy-weighted duration in milliseconds across the whole hat — "
+            "the closed/open axis. Higher means longer sustain.",
     ),
 )
 
@@ -158,4 +166,8 @@ PROFILE = InstrumentProfile(
     hf_band=(5000.0, 20000.0),
     fundamental_band=None,   # unpitched
     latent_dim=32,
+    waveform_controls=True,
+    # Shimmer legitimately re-peaks the envelope every ~100-300 ms; a
+    # monotonic-decay gate would veto real hats.
+    envelope_gate=False,
 )

@@ -241,6 +241,13 @@ def _calibrate_ranges(basis: DescriptorBasis, response, descriptors: np.ndarray)
 
     Endpoints derive from the loaded decoder, not a hardcoded latent multiplier.
     Errors are fractions of the proposed slider's travel, not raw mixed units.
+
+    Corner, axis and interior probes that the corpus itself never produces
+    (no real hit within 15% of the span) ask the decoder for physically
+    unsupported combinations; they are recorded but not binding. What is
+    binding: the centre, plus every corpus-realistic probe — sliders must
+    track 1:1 wherever sounds like that exist, and decode gracefully
+    (trust-region bounded) beyond.
     """
     import itertools
 
@@ -250,28 +257,45 @@ def _calibrate_ranges(basis: DescriptorBasis, response, descriptors: np.ndarray)
     basis.anchor = ((centre_z - basis.mean_z) @ basis.transform_inverse.T)[0]
     dims = len(centre)
     corners = np.array(list(itertools.product((-0.5, 0.5), repeat=dims)))
+    axis = np.concatenate([np.eye(dims), -np.eye(dims)]) * 0.5
     interior = np.random.default_rng(917).uniform(-0.5, 0.5, size=(16, dims))
-    probes = np.vstack([np.zeros(dims), corners, interior])
+    probes = np.vstack([np.zeros(dims), corners, axis, interior])
+    support_slack = 0.15  # spans: corpus hits this far off a target cannot anchor it
     tolerance = 0.01  # at most one UI step of error in every descriptor
     attempts = []
     for fraction in (1.0, 0.8, 0.64, 0.512, 0.4096, 0.32768, 0.262144):
         span = (hi - lo) * fraction
-        errors = []
-        for point in probes:
+        binding, informational = [], []
+        for j, point in enumerate(probes):
             target = centre + point * span
             z = basis.solve(target, response)
             error = float(np.max(np.abs(np.asarray(response(z)).reshape(-1) - target)
                                   / np.maximum(span, 1e-6)))
             quality = response.quality(z) if hasattr(response, "quality") else None
-            errors.append(max(error, float(np.max(quality)) if quality is not None else 0.0))
-            if errors[-1] > tolerance:
+            error = max(error, float(np.max(quality)) if quality is not None else 0.0)
+            if j == 0:
+                binding.append(error)  # the centre must always be reachable exactly
+                if error > tolerance:
+                    break
+                continue
+            supported = (np.max(np.abs(descriptors - target)
+                                / np.maximum(span, 1e-6), axis=1).min()
+                         <= support_slack)
+            (binding if supported else informational).append(error)
+            if supported and error > tolerance:
                 break
-        worst = max(errors)
-        print(f"  Range {fraction:.1%}: worst control/envelope error {worst:.3%}", flush=True)
-        attempts.append({"range_fraction": fraction, "max_error": worst, "probes": len(errors)})
+        worst = max(binding)
+        worst_unsupported = max(informational) if informational else 0.0
+        print(f"  Range {fraction:.1%}: worst supported-probe error {worst:.3%}"
+              f"{f', unsupported up to {worst_unsupported:.3%}' if informational else ''}",
+              flush=True)
+        attempts.append({"range_fraction": fraction, "max_error": worst,
+                         "max_unsupported_error": worst_unsupported,
+                         "probes": len(binding)})
         if worst <= tolerance:
             return (centre - span / 2).tolist(), (centre + span / 2).tolist(), {
                 "version": 1, "range_fraction": fraction, "max_error": worst,
+                "max_unsupported_error": worst_unsupported,
                 "tolerance": tolerance, "probes": len(probes), "attempts": attempts,
                 "scope": "decoded_spectrogram", "corpus_min": lo.tolist(), "corpus_max": hi.tolist(),
             }

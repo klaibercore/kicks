@@ -56,12 +56,17 @@ Dependency direction is one-way: `instruments/` imports only
 ### `kicks/instruments/` — the profile system
 
 - **`profile.py`** — the data types. `Region` (a rectangle of the spectrogram),
-  `DescriptorSpec` (a slider axis: one of four kinds — `mean`, `log_ratio`,
-  `fraction`, `inverse_ratio` — over one or two regions), `MetricSpec` (an eval
+  `DescriptorSpec` (a slider axis: `mean`, `log_ratio`, `fraction`,
+  `inverse_ratio`, or the gain-invariant `power_db_ratio` / `centroid_ms` the
+  calibrated profiles use — over one or two regions), `MetricSpec` (an eval
   metric plus weight and verdict phrasing; `gate=True` means a hard penalty
   rather than a weighted contribution, `multivariate=False` excludes it from the
   Mahalanobis/Fréchet stats), `OnsetSpec`, `StripSpec`, `EvalWindows`,
   `TransientLossSpec`, `PathSpec`, and `InstrumentProfile` tying them together.
+  `waveform_controls` opts a profile into the closed-loop waveform correction;
+  `envelope_gate` (default on) additionally vetoes slider targets whose decoded
+  low-end envelope re-peaks — turn it off for instruments whose envelope
+  legitimately does (hi-hat shimmer).
 - **`metrics.py`** — `standard_metrics(noun, plural, drop=(), overrides={})`
   builds the 12-metric set with the instrument's noun substituted in. Profiles
   drop what does not apply and re-word what reads wrong.
@@ -122,7 +127,12 @@ size is a constructor argument so a short-tail instrument can use fewer frames.
 - **`calibration.py`** — `fit_or_load_basis(...)` persists the fitted descriptor
   basis plus its calibrated slider ranges to `<checkpoint>.controls.npz`
   (arrays + JSON only, loaded with `allow_pickle=False`), fingerprinted on the
-  checkpoint bytes, profile and corpus. A restart reuses it; a mismatch refits.
+  checkpoint bytes, `CALIBRATION_VERSION`, profile and corpus. A restart reuses
+  it; a mismatch refits. Bump the version whenever the range search in
+  `basis._calibrate_ranges` changes. That search shrinks the slider box until
+  every *corpus-supported* probe (a real hit within 15% of the span) tracks its
+  target within 1%; probes the corpus never produces are recorded as
+  `max_unsupported_error` but are not binding.
 - **`evaluation.py`** — `analyze_hit(x, profile)`, `build_reference`,
   `reference_from_rows`, `score_sample`, `frechet_distance`, `run_eval`. numpy/
   scipy only. The reference cache is fingerprinted on the instrument *and* the

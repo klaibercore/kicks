@@ -24,38 +24,42 @@ from .profile import (
     TransientLossSpec,
 )
 
+# BigVGAN's Slaney mel centres: bands 5:16 = 186-527 Hz, 16:52 =
+# 527 Hz-1.94 kHz, 56:96 = 2.21-7.93 kHz, 72:112 = 3.68-13.2 kHz.
+# Four frames are 23.2 ms; frame 14 is 81.3 ms, frame 24 is 139 ms.
+# Fixed short windows keep level controls from implicitly measuring the
+# length of the entire hit; the wire tail legitimately runs to ~140 ms.
 DESCRIPTORS = (
     DescriptorSpec(
-        "body", "Body", "mean",
-        region=Region(bands=(3, 14), frames=(3, None)),
-        doc="Shell weight, ~150-420 Hz, transient excluded.",
+        "body", "Body", "power_db_ratio",
+        region=Region(bands=(5, 16), frames=(4, 14)),
+        reference=Region(bands=(16, 52), frames=(4, 14)),
+        doc="Shell weight at 190-530 Hz relative to the 0.5-2 kHz mids.",
     ),
     DescriptorSpec(
-        "crack", "Crack", "log_ratio",
-        region=Region(bands=(55, 95), frames=(0, 3)),
-        reference=Region(bands=(55, 95), frames=(3, 24)),
-        scale=2.0,
-        doc="Attack-to-body contrast in the wire band (~2-8 kHz) — the initial snap.",
+        "crack", "Crack", "power_db_ratio",
+        region=Region(bands=(56, 96), frames=(0, 4)),
+        reference=Region(bands=(56, 96), frames=(4, 14)),
+        doc="Wire-band attack-to-body contrast at 2-8 kHz. Higher means a harder initial snap.",
     ),
     DescriptorSpec(
-        "snap", "Snap", "fraction",
-        region=Region(bands=(60, None), frames=(3, 24)),
-        reference=Region(bands=(0, 30), frames=(3, 24)),
+        "snap", "Snap", "power_db_ratio",
+        region=Region(bands=(56, 96), frames=(4, 24)),
+        reference=Region(bands=(5, 16), frames=(4, 24)),
         doc="Wire rattle against shell tone over the first ~140 ms. "
             "High = wires wide open, low = muted / tuned-down thud.",
     ),
     DescriptorSpec(
-        "bright", "Bright", "fraction",
-        region=Region(bands=(70, None), frames=(3, None)),
-        reference=Region(bands=(0, 40), frames=(3, None)),
-        doc="Share of body energy above ~3.5 kHz.",
+        "bright", "Bright", "power_db_ratio",
+        region=Region(bands=(72, 112), frames=(4, 24)),
+        reference=Region(bands=(16, 52), frames=(4, 24)),
+        doc="Wire-body brightness at 3.7-13 kHz, after the initial stick crack.",
     ),
     DescriptorSpec(
-        "decay", "Decay", "inverse_ratio",
-        region=Region(bands=(0, 70), frames=(16, 64)),
-        reference=Region(bands=(0, 70), frames=(3, 16)),
-        doc="Early-to-late energy ratio over ~93-370 ms. Higher = tight, gated "
-            "crack; lower = ringing, room-heavy snare.",
+        "decay", "Decay", "centroid_ms",
+        region=Region(bands=(5, 96), frames=(0, None)),
+        doc="Energy-weighted duration in milliseconds across shell and wires. "
+            "Higher means longer sustain.",
     ),
 )
 
@@ -128,4 +132,5 @@ PROFILE = InstrumentProfile(
     hf_band=(2000.0, 16000.0),
     fundamental_band=(120.0, 400.0),
     latent_dim=32,
+    waveform_controls=True,
 )

@@ -125,7 +125,7 @@ class DecoderResponse:
         import torch.nn.functional as F
         from ..audio.constants import HOP_LENGTH, LOG_MEL_MAX, LOG_MEL_MIN
 
-        if not self.profile.waveform_controls:
+        if not (self.profile.waveform_controls and self.profile.envelope_gate):
             return None
         device = next(self.model.parameters()).device
         with torch.enable_grad():
