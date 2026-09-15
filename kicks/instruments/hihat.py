@@ -170,4 +170,10 @@ PROFILE = InstrumentProfile(
     # Shimmer legitimately re-peaks the envelope every ~100-300 ms; a
     # monotonic-decay gate would veto real hats.
     envelope_gate=False,
+    # DisCoder was trained on music and speech and inverts real hi-hat mels
+    # poorly (4.2 dB active-mel error vs BigVGAN's 1.9 dB); on the 85-render
+    # control audit it scored 94.5 mean / 48.5 min with three failing renders
+    # against BigVGAN's 95.4 / 70.7 with none. Its texture on a sustained noise
+    # plateau is bumpier, so long-decay hats pick up a third onset.
+    vocoder="bigvgan",
 )

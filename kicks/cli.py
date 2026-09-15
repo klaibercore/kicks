@@ -77,7 +77,7 @@ def train(
     from torch.utils.data import DataLoader
 
     from kicks.audio.constants import SAMPLE_RATE
-    from kicks.audio.vocoder import load_vocoder, spec_to_audio
+    from kicks.audio.vocoder import load_vocoder, resolve_vocoder_type, spec_to_audio
     from kicks.config import get_device, load_vae_from_checkpoint
     from kicks.data import DrumDataset
     from kicks.instruments import get_profile
@@ -123,7 +123,7 @@ def train(
         from kicks.synthesis.generator import fit_latent_prior
 
         out_dir = profile.paths.output_dir
-        vocoder = load_vocoder(device, weights_dir=profile.paths.vocoder_dir)
+        vocoder = load_vocoder(device, resolve_vocoder_type(profile), profile.paths.vocoder_dir)
         model, _ = load_vae_from_checkpoint(profile.paths.checkpoint, device)
         prior = fit_latent_prior(model, device, data, profile.paths.latent_prior)
         prior.random_state = np.random.RandomState(seed)
@@ -151,7 +151,8 @@ def serve(
     port: int = typer.Option(8080, "--port", "-p", help="API port"),
     host: str = typer.Option("0.0.0.0", "--host", help="API host"),
     data: str = typer.Option(None, "--data", "-d", help="Override the corpus root directory"),
-    griffin_lim: bool = typer.Option(False, "--griffin-lim", help="Use Griffin-Lim instead of BigVGAN (lower quality, no GPU needed)"),
+    griffin_lim: bool = typer.Option(False, "--griffin-lim", help="Use classical reconstruction (lower quality, no model download)"),
+    vocoder: str = typer.Option(None, "--vocoder", help="Force one backend for every instrument: discoder, bigvgan or griffinlim (default: each profile's own)"),
     control: str = typer.Option(None, "--control", help="Slider basis: 'descriptor' (default) or 'pca'"),
     reload: bool = typer.Option(False, "--reload", help="Auto-reload on code changes (development)"),
 ) -> None:
@@ -170,8 +171,11 @@ def serve(
     os.environ["KICKS_CONTROL"] = control
     if data:
         os.environ["KICKS_DATA_DIR"] = data
-    if griffin_lim:
-        os.environ["KICKS_VOCODER"] = "griffinlim"
+    backend = "griffinlim" if griffin_lim else vocoder or os.environ.get("KICKS_VOCODER")
+    if backend:
+        if backend not in ("discoder", "bigvgan", "griffinlim"):
+            raise typer.BadParameter("vocoder must be 'discoder', 'bigvgan', or 'griffinlim'")
+        os.environ["KICKS_VOCODER"] = backend
 
     print(f"Serving {profile.display_name} on http://{host}:{port}")
     uvicorn.run("kicks.api:app", host=host, port=port, reload=reload)
@@ -185,7 +189,8 @@ def generate(
     data: str = typer.Option(None, "--data", "-d", help="Corpus directory (latent prior + eval reference)"),
     out: str = typer.Option(None, "--out", "-o", help="Output directory"),
     seed: int = typer.Option(-1, "--seed", help="Random seed (-1 = random)"),
-    griffin_lim: bool = typer.Option(False, "--griffin-lim", help="Use Griffin-Lim instead of BigVGAN"),
+    griffin_lim: bool = typer.Option(False, "--griffin-lim", help="Use classical reconstruction without a model download"),
+    vocoder: str = typer.Option(None, "--vocoder", envvar="KICKS_VOCODER", help="discoder, bigvgan or griffinlim (default: the profile's own)"),
     refresh_prior: bool = typer.Option(False, "--refresh-prior", help="Re-fit the cached latent GMM prior"),
 ) -> None:
     """Generate one-shots by sampling the corpus latent prior (best-of-k selection)."""
@@ -198,7 +203,7 @@ def generate(
         data_dir=data,
         out_dir=out,
         seed=None if seed < 0 else seed,
-        vocoder_type="griffinlim" if griffin_lim else "bigvgan",
+        vocoder_type="griffinlim" if griffin_lim else vocoder,
         refresh_prior=refresh_prior,
     )
 

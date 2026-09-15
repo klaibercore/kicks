@@ -1,7 +1,10 @@
-"""Loaded synthesis state: one model, vocoder and slider basis per instrument.
+"""Loaded synthesis state: one model and slider basis per instrument, and the
+vocoder each instrument's profile asks for.
 
 Instruments are loaded lazily and kept, so a server started for kicks can serve
 snares on request without a restart — at the cost of one model's memory each.
+Vocoders are cached by backend and weights directory, so two instruments that
+agree on a backend share one copy.
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ from ..config import get_device, load_vae_from_checkpoint
 from ..data import DrumDataset
 from ..instruments import DEFAULT_INSTRUMENT, InstrumentProfile, get_profile
 from ..nn import VAE
-from ..audio.vocoder import load_vocoder
+from ..audio.vocoder import load_vocoder, resolve_vocoder_type
 
 
 @dataclass
@@ -49,11 +52,12 @@ class ServerState:
 
     def __init__(self) -> None:
         self.device: torch.device = torch.device("cpu")
-        self.vocoder: object = None
-        self.vocoder_type: str = "bigvgan"
+        #: ``KICKS_VOCODER`` / ``--vocoder``: force one backend for every instrument.
+        self.vocoder_override: str | None = None
         self.control_basis: str = "descriptor"
         self.default_instrument: str = DEFAULT_INSTRUMENT
         self._instruments: dict[str, InstrumentState] = {}
+        self._vocoders: dict[tuple[str, str | None], object] = {}
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -64,20 +68,46 @@ class ServerState:
         control_basis: str | None = None,
     ) -> InstrumentState:
         self.device = get_device()
-        self.vocoder_type = vocoder_type or os.environ.get("KICKS_VOCODER", "bigvgan")
+        self.vocoder_override = vocoder_type or os.environ.get("KICKS_VOCODER") or None
+        if self.vocoder_override:
+            resolve_vocoder_type(None, self.vocoder_override)  # fail fast on a typo
         self.control_basis = control_basis or os.environ.get("KICKS_CONTROL", "descriptor")
         if self.control_basis not in ("pca", "descriptor"):
             raise ValueError("KICKS_CONTROL must be 'descriptor' or 'pca'")
         profile = get_profile(instrument)
         self.default_instrument = profile.name
-        self.vocoder = load_vocoder(
-            self.device, self.vocoder_type, profile.paths.vocoder_dir,
-        )
         return self.load(profile.name)
 
     @property
     def loaded(self) -> list[str]:
         return list(self._instruments)
+
+    @property
+    def vocoder_type(self) -> str:
+        """What ``/health`` reports: the forced backend, or ``profile`` when each
+        instrument uses its own."""
+        return self.vocoder_override or "profile"
+
+    def vocoder_type_for(self, profile: InstrumentProfile) -> str:
+        return resolve_vocoder_type(profile, self.vocoder_override)
+
+    def vocoder_for(self, profile: InstrumentProfile):
+        """The loaded backend for one instrument, shared where profiles agree.
+
+        BigVGAN's fine-tuned weights are per instrument (``paths.vocoder_dir``),
+        so the cache key carries the directory; DisCoder and Griffin-Lim have
+        one set of weights and key on the backend alone.
+        """
+        kind = self.vocoder_type_for(profile)
+        key = (kind, profile.paths.vocoder_dir if kind == "bigvgan" else None)
+        if key not in self._vocoders:
+            self._vocoders[key] = load_vocoder(self.device, kind, profile.paths.vocoder_dir)
+        return self._vocoders[key]
+
+    @property
+    def vocoders(self) -> dict[str, str]:
+        """Loaded instrument -> backend, for ``/health``."""
+        return {name: self.vocoder_type_for(inst.profile) for name, inst in self._instruments.items()}
 
     def get(self, name: str | None = None) -> InstrumentState:
         """Return an instrument's state, loading it on first request."""
@@ -100,6 +130,7 @@ class ServerState:
         )
         for i, name_ in enumerate(basis.names):
             print(f"  {name_} range: [{basis.mins[i]:.3f}, {basis.maxs[i]:.3f}]")
+        self.vocoder_for(profile)  # load its backend now, not on the first render
 
         state = InstrumentState(
             profile=profile, model=model, basis=basis,

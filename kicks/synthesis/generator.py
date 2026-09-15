@@ -21,7 +21,7 @@ import torch
 
 from ..analysis.evaluation import analyze_hit, build_reference, score_sample
 from ..audio.constants import SAMPLE_RATE
-from ..audio.vocoder import load_vocoder, spec_to_audio
+from ..audio.vocoder import load_vocoder, resolve_vocoder_type, spec_to_audio
 from ..config import get_device, load_vae_from_checkpoint
 from ..instruments import InstrumentProfile, get_profile
 
@@ -114,7 +114,7 @@ def generate(
     out_dir: str | None = None,
     checkpoint: str | None = None,
     seed: int | None = None,
-    vocoder_type: str = "bigvgan",
+    vocoder_type: str | None = None,
     refresh_prior: bool = False,
 ) -> list[str]:
     """Generate one-shots: GMM-prior sampling plus best-of-k perceptual selection."""
@@ -138,7 +138,7 @@ def generate(
         model, device, data_dir, profile.paths.latent_prior, refresh=refresh_prior,
     )
     gmm.random_state = np.random.RandomState(seed)
-    vocoder = load_vocoder(device, vocoder_type, profile.paths.vocoder_dir)
+    vocoder = load_vocoder(device, resolve_vocoder_type(profile, vocoder_type), profile.paths.vocoder_dir)
     ref = build_reference(data_dir, profile)
 
     n_candidates = count * max(1, best_of)

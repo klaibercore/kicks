@@ -16,15 +16,15 @@ drum type means adding a profile, not editing the pipeline.
 Samples (.wav)
   -> strip:  isolate single hits, exclude loops        [profile: onset band, durations]
   -> clean:  quarantine double-hits and outliers       [profile: onset spacing]
-  -> LUFS loudness normalisation (-14 LUFS)
-  -> BigVGAN log-mel spectrograms (128 x 256)
+  -> peak-safe loudness normalisation (up to -14 LUFS)
+  -> shared DisCoder / BigVGAN log-mel spectrograms (128 x 256)
   -> fixed normalisation [-11.51, 3.0] -> [0, 1]
   -> beta-VAE training, cyclical annealing + free bits [profile: transient loss windows]
   -> latent vectors (32-dim)
   -> slider basis: PCA or supervised descriptor axes   [profile: descriptors]
   -> slider values -> inverse transform -> z
   -> VAE decoder -> spectrogram
-  -> BigVGAN or Griffin-Lim vocoder -> audio
+  -> vocoder (per profile: DisCoder or BigVGAN) -> waveform descriptor correction -> audio
   -> eval:   corpus-referenced perceptual verdicts     [profile: metrics, phrasing]
 ```
 
@@ -123,14 +123,46 @@ serve is a real choice. Copy the one you want over `vae_best.pth`.
 **Server** (REST API at `http://localhost:8080`):
 
 ```bash
-kicks serve                        # kick, BigVGAN, PCA sliders
+kicks serve                        # each instrument renders with its profile's vocoder
 kicks serve -i snare               # snare
+kicks serve --vocoder bigvgan      # force one neural backend for every instrument
 kicks serve --griffin-lim          # CPU-only, no model download
-kicks serve --control descriptor   # sliders target descriptors directly
+kicks serve --control pca          # alternative latent PCA controls
 ```
 
 Instruments load lazily, so one server can serve all three once trained — the
 website's instrument tabs just call `/config?instrument=...`.
+
+### Vocoders
+
+Each profile names the mel-to-audio backend it renders best with
+(`InstrumentProfile.vocoder`). The choice is measured, not aesthetic: on the
+85-render control audit, [ETH DISCO's DisCoder](https://github.com/ETH-DISCO/discoder)
+scores 98.3 mean / 93.6 min on kicks (BigVGAN: 98.0 / 89.1) and 97.2 / 84.1 on
+snares (96.8 / 86.4), at roughly half BigVGAN's render time on Apple Silicon;
+on hi-hats it drops to 94.5 / 48.5 with three failing renders (BigVGAN: 95.4 /
+70.7, none), so the hi-hat profile keeps BigVGAN. `KICKS_VOCODER` or
+`--vocoder` forces one backend for every instrument.
+
+DisCoder runs from the [official 44.1 kHz Z checkpoint](https://huggingface.co/disco-eth/discoder)
+with its fine-tuned DAC decoder. Its 128-band mel representation matches this
+project's existing VAE checkpoints, so switching vocoders does not require
+retraining the VAE.
+
+The first DisCoder load downloads `config.json` and the 1.72 GB `model.pt` to
+`models/discoder/` (revision `6505384d8fd5f18338f171dd81dc10c9a0d34fe9`).
+Set `KICKS_DISCODER_DIR` to use a different local checkpoint directory. Loading
+checks the mel parameters and every model weight; incompatible checkpoints fail
+explicitly. The inference adapter's upstream MIT notice is included in
+[`kicks/nn/DISCODER_LICENSE`](kicks/nn/DISCODER_LICENSE).
+
+Weights load through a memory-mapped checkpoint, and batch generation renders
+one DisCoder hit at a time to limit activation memory on smaller machines.
+
+BigVGAN picks up instrument-specific fine-tuned weights from the profile's
+`vocoder_dir` (`models/vocoder/checkpoint_100.pth` for the kick). `--vocoder
+griffinlim` uses classical reconstruction without a model download;
+`--griffin-lim` remains an alias.
 
 **Batch:**
 
@@ -251,18 +283,24 @@ needs a human:
 
 ## Slider bases
 
-`--control pca` (default) fits principal components of the corpus latents and
+`--control descriptor` is the default. Each slider targets its own gain-invariant
+measurement: spectral power ratios in dB, or energy-weighted duration in ms.
+A bounded nonlinear solve stays within the corpus's latent region, followed by
+feedback from the actual vocoded waveform to cancel reconstruction drift.
+The ranges are calibrated against the checkpoint and corpus and cached in
+`<checkpoint>.controls.npz`; changed weights, descriptors or data trigger a refit.
+
+Independence is measured against these descriptors within the calibrated ranges.
+It does not imply that every listener perceives every sound attribute as
+independent. Explicit envelope, drive and filter effects intentionally change
+the resulting measurements.
+
+`--control pca` fits principal components of the corpus latents and
 names each after the descriptor it correlates with most (|r| >= 0.15), flipping
 sign so every slider reads left-to-right as "less" to "more". Honest about the
 data's own structure, but each component moves several descriptors at once, so
 one axis — the profile's `decorrelated_descriptor`, decay by default — gets
 explicit cross-talk compensation.
-
-`--control descriptor` fits a supervised map instead: slider *j* targets
-descriptor *j*, with first-order cross-talk cancelled by construction. A
-closed-loop Newton correction (two extra decodes) roughly doubles slider
-authority over the open-loop linear map, because the decoder's response is
-nonlinear away from the corpus mean.
 
 ## Evaluation
 
@@ -276,6 +314,30 @@ one set-level number.
 Metrics are computed on the final waveform — post-vocoder — because that is what
 the listener hears and where vocoder artefacts actually live. The module imports
 only numpy and scipy, so it starts in well under a second.
+
+Compare actual corpus reconstructions, including a local audio comparison page:
+
+```bash
+python scripts/compare_vocoders.py --count 16 --checkpoint models/vae_best.pth \
+  --out output/reconstruction
+python scripts/validate_controls.py --checkpoint models/vae_best.pth \
+  --corners --random 32 --out output/kick-controls      # --vocoder to override the profile
+```
+
+The second audit measures all slider axes, corners and independent random
+combinations on final audio. Its report includes target error, cross-talk,
+corpus realism scores and render time. Reconstruction errors and corpus realism
+scores answer different questions; neither replaces listening.
+
+To fine-tune a VAE in a separate candidate directory:
+
+```bash
+kicks train --resume models/vae_best.pth --model-dir output/candidate/models \
+  --epochs 12 --learning-rate 0.00003 --beta 0.001 --preview 0
+```
+
+Training evaluates the original checkpoint before updating the best candidate,
+using a fixed validation split and posterior means for repeatable comparisons.
 
 ## Project structure
 
@@ -293,9 +355,9 @@ kicks/
     io.py              torch-side loading: mono, resample, fit length, LUFS
     mel.py             BigVGAN log-mel + [0,1] normalisation
     effects.py         Envelope shaper, drive, lowpass (API query params)
-    vocoder.py         BigVGAN and Griffin-Lim backends
+    vocoder.py         DisCoder, BigVGAN and Griffin-Lim backends
   data/              DrumDataset, load_spectrogram
-  nn/                VAE (spectrogram size is a constructor argument)
+  nn/                VAE and the DisCoder inference adapter
   training/          loss.py, trainer.py
   analysis/          descriptors, latents, basis (sliders), evaluation, clustering
   synthesis/         generator.py — latent prior + best-of-k selection
@@ -352,8 +414,9 @@ on the query string. CORS is a single origin by default, set via
 | `KICKS_DATA_DIR` | `data` | Corpus root |
 | `KICKS_MODEL_DIR` | `models` | Checkpoint root |
 | `KICKS_OUTPUT_DIR` | `output` | Output root |
-| `KICKS_VOCODER` | `bigvgan` | `bigvgan` or `griffinlim` |
-| `KICKS_CONTROL` | `pca` | `pca` or `descriptor` |
+| `KICKS_VOCODER` | unset (each profile's own) | Force `discoder`, `bigvgan` or `griffinlim` for every instrument |
+| `KICKS_DISCODER_DIR` | `<KICKS_MODEL_DIR>/discoder` | Local DisCoder config and weights |
+| `KICKS_CONTROL` | `descriptor` | `descriptor` or `pca` |
 | `KICKS_CORS_ORIGINS` | `http://localhost:3000` | Comma-separated |
 | `KICKS_SUPABASE_URL` | unset | Enables accounts; tokens verified via JWKS |
 | `KICKS_SUPABASE_SERVICE_KEY` | unset | Enables `/export` credit charging |

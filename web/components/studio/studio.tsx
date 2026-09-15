@@ -83,7 +83,7 @@ function StudioBody() {
         </div>
         {studio.health ? (
           <div className="flex flex-wrap gap-1.5 font-mono text-[11px]">
-            <Badge variant="outline">{studio.health.vocoder}</Badge>
+            <Badge variant="outline">{studio.config?.vocoder ?? studio.health.vocoder}</Badge>
             <Badge variant="outline">{studio.health.control} basis</Badge>
             <Badge variant="outline">{studio.health.device}</Badge>
           </div>

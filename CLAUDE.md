@@ -14,6 +14,7 @@ kicks clean                               # Quarantine loops/outliers (dry run; 
 kicks train                               # Train the VAE
 kicks serve                               # REST API on :8080 (the website in web/ is its client)
 kicks serve --griffin-lim                 # CPU vocoder, no model download
+kicks serve --vocoder bigvgan             # Force one backend (default: each profile's own)
 kicks serve --control descriptor          # Sliders target descriptors directly
 kicks generate -n 20 -k 8                 # GMM latent prior + best-of-k eval selection
 kicks eval                                # Score generated output against the corpus
@@ -50,7 +51,8 @@ Dependency direction is one-way: `instruments/` imports only
 ```
 .wav → strip/clean → DrumDataset (LUFS → BigVGAN log-mel → fixed-norm [0,1])
   → VAE train → latents (32-dim µ) → slider basis (PCA or descriptor)
-  → slider values → inverse transform → VAE decode → vocoder → .wav → eval
+  → slider values → closed-loop solve → VAE decode → vocoder (per profile)
+  → waveform correction → .wav → eval
 ```
 
 ### `kicks/instruments/` — the profile system
@@ -66,7 +68,9 @@ Dependency direction is one-way: `instruments/` imports only
   `waveform_controls` opts a profile into the closed-loop waveform correction;
   `envelope_gate` (default on) additionally vetoes slider targets whose decoded
   low-end envelope re-peaks — turn it off for instruments whose envelope
-  legitimately does (hi-hat shimmer).
+  legitimately does (hi-hat shimmer). `vocoder` names the mel-to-audio backend
+  the instrument renders best with (`discoder` default; the hi-hat says
+  `bigvgan`) — a measured choice, with the audit numbers in the profile comment.
 - **`metrics.py`** — `standard_metrics(noun, plural, drop=(), overrides={})`
   builds the 12-metric set with the instrument's noun substituted in. Profiles
   drop what does not apply and re-word what reads wrong.
@@ -101,9 +105,24 @@ Do not "tidy" those numbers.
   bounded STFT gains (`profile.waveform_controls` masks) solved closed-loop
   against the real vocoded waveform, applied before user effects to cancel
   vocoder drift. Profiles opt in via `waveform_controls`.
-- **`vocoder.py`** — `load_vocoder(device, type, weights_dir)` and
-  `spec_to_audio(spec, vocoder, device)`. Both backends share one post-chain:
-  25 Hz highpass, 20 kHz lowpass, peak normalise, `gate_tail`.
+- **`vocoder.py`** — three backends: DisCoder (`load_discoder`, the pinned
+  official 44.1 kHz Z checkpoint, 1.72 GB, downloaded to `models/discoder/` on
+  first use, mmap-loaded), BigVGAN (`load_bigvgan`, plus fine-tuned weights from
+  the profile's `vocoder_dir`) and Griffin-Lim. `resolve_vocoder_type(profile,
+  requested)` is the one place precedence lives: explicit > `KICKS_VOCODER` >
+  `profile.vocoder`. `spec_to_audio(spec, vocoder, device)` honours a backend's
+  `inference_batch_size` (DisCoder renders one hit at a time — 430M params on an
+  8 GB Mac). All three share one post-chain: 25 Hz highpass, 20 kHz lowpass,
+  peak normalise, `gate_tail`.
+
+### `kicks/nn/`
+
+- **`discoder.py`** — inference-only port of ETH DISCO's DisCoder (upstream
+  commit `8aee1ee`, MIT — `DISCODER_LICENSE` ships in the wheel). Encoder is
+  verified bit-exact against upstream on a reduced fixture; the DAC decoder comes
+  from the `descript-audio-codec` package. Pads odd frame counts to a training
+  segment and crops back.
+- **`vae.py`** — below.
 
 ### `kicks/nn/vae.py`
 
@@ -158,7 +177,10 @@ size is a constructor argument so a short-tail instrument can use fewer frames.
   (`charge_export`, `refund_export`, `credit_balance`) through PostgREST as the
   service role. Off unless `KICKS_SUPABASE_URL` is set, so local dev is open.
 - **`state.py`** — `ServerState` loads instruments lazily and keeps them, so one
-  server can serve several drums.
+  server can serve several drums. Vocoders are cached per `(backend,
+  weights_dir)` and resolved per instrument (`vocoder_for(profile)`); `/health`
+  reports `vocoder: "profile"` plus a per-instrument `vocoders` map unless a
+  backend is forced, and `/config` reports the instrument's own.
 - **`middleware.py`** — token-bucket `RateLimiter`, `LRUCache`.
 
 ### `web/` — the website
@@ -229,7 +251,11 @@ on Base UI (not Radix: composition is `render={<Link/>}`, not `asChild`).
   ledger has a unique index on it, so a retry returns the same charge
 - **Static-export routes** end in `/` (`trailingSlash: true`); link to `/studio/`,
   not `/studio`
-- **Vocoder selection**: `KICKS_VOCODER=griffinlim` or `--griffin-lim`
+- **Vocoder selection**: per profile (`profile.vocoder`: kick and snare
+  `discoder`, hi-hat `bigvgan`). `KICKS_VOCODER=…` / `--vocoder …` /
+  `--griffin-lim` force one backend for every instrument. The calibration
+  sidecars are vocoder-independent (decoded-spectrogram scope); the waveform
+  correction closes the loop on whichever backend rendered
 - **Control basis**: `KICKS_CONTROL=descriptor|pca` or `--control ...`, default
   `descriptor` (closed-loop descriptor solve; PCA remains available as fallback)
 
@@ -238,6 +264,14 @@ on Base UI (not Radix: composition is `render={<Link/>}`, not `asChild`).
 - BigVGAN's `n_fft` is **1024**, not 2048 — must match across constants, dataset
   and vocoder. `load_bigvgan` still picks up any `*.pth` in the profile's
   `vocoder_dir` (`models/vocoder/checkpoint_100.pth` is the tuned kick vocoder).
+  DisCoder shares the exact same mel (`validate_discoder_config` refuses a
+  checkpoint that does not), which is why no VAE was retrained for it.
+- DisCoder is a generic music vocoder: it inverts *real* drum mels worse than
+  BigVGAN (kick 3.7 vs 2.3 dB, hi-hat 4.2 vs 1.9 dB active-mel error) yet
+  tracks the VAE's blurred, out-of-distribution mels better on pitched drums.
+  Judge a vocoder on `scripts/validate_controls.py` (the generation path), not
+  on `scripts/compare_vocoders.py` alone. Don't switch the hi-hat to DisCoder
+  without re-running that audit.
 - `BigVGAN.from_pretrained` is patched (`patch_bigvgan_from_pretrained`) for
   huggingface_hub >= 1.0. Idempotent.
 - Griffin-Lim uses the mel filterbank pseudo-inverse, not `InverseMelScale`

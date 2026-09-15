@@ -1,4 +1,4 @@
-# The kicks REST API with the BigVGAN vocoder. The website in web/ is a static
+# The kicks REST API with the DisCoder and BigVGAN vocoders. The website in web/ is a static
 # site (GitHub Pages) that talks to this container. GPU is recommended; falls
 # back to CPU.
 
@@ -15,12 +15,9 @@ COPY pyproject.toml README.md ./
 COPY kicks/ ./kicks/
 RUN pip install --no-cache-dir .
 
-# Pre-download BigVGAN so the first request does not pay for it.
-RUN python -c "from kicks.audio.vocoder import patch_bigvgan_from_pretrained; \
-    patch_bigvgan_from_pretrained(); \
-    import bigvgan; \
-    bigvgan.BigVGAN.from_pretrained('nvidia/bigvgan_v2_44khz_128band_256x', use_cuda_kernel=False)" \
-    || echo "BigVGAN pre-download skipped (will download on first run)"
+# Vocoder weights download on startup into the persistent models volume.
+# This also lets KICKS_VOCODER select a backend without baking another model
+# into every image.
 
 EXPOSE 8080
 

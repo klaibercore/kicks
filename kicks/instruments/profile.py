@@ -394,6 +394,11 @@ class InstrumentProfile:
     #: envelope genuinely decays monotonically — a hi-hat's shimmer legitimately
     #: re-peaks, so the gate must not fire there.
     envelope_gate: bool = True
+    #: Mel-to-audio backend this instrument renders best with: ``"discoder"``,
+    #: ``"bigvgan"`` or ``"griffinlim"``. Measured, not aesthetic — see each
+    #: profile for the audit that picked it. ``KICKS_VOCODER`` / ``--vocoder``
+    #: still force one backend for every instrument (e.g. Griffin-Lim on CPU).
+    vocoder: str = "discoder"
 
     # -- descriptors --------------------------------------------------------
 

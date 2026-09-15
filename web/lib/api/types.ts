@@ -32,6 +32,7 @@ export interface InstrumentConfig {
   display_name: string;
   description: string;
   sliders: SliderDef[];
+  /** The backend this instrument renders with. */
   vocoder: string;
   control: "pca" | "descriptor";
 }
@@ -64,7 +65,10 @@ export interface Spectrogram {
 export interface Health {
   status: string;
   device: string;
+  /** A forced backend, or "profile" when each instrument renders with its own. */
   vocoder: string;
+  /** Loaded instrument -> backend actually in use. */
+  vocoders?: Record<string, string>;
   control: string;
   loaded: string[];
   cached_responses: number;

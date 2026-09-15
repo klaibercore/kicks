@@ -161,14 +161,15 @@ def _synthesize(request: Request, inst: InstrumentState) -> tuple[torch.Tensor, 
     decay_ms = _float_param(request, "decay_ms")
     drive = _float_param(request, "drive")
     cutoff = _float_param(request, "filter")
-    key = repr((id(inst.model), id(state.vocoder), positions, attack_ms, decay_ms, drive, cutoff))
+    vocoder = state.vocoder_for(inst.profile)
+    key = repr((id(inst.model), id(vocoder), positions, attack_ms, decay_ms, drive, cutoff))
     cached = render_cache.get(key)
     if cached is not None:
         return cached
     z = _latent_for(request, inst)
     with torch.no_grad():
         spec = inst.model.decode(z)
-    waveform = spec_to_audio(spec, state.vocoder, state.device)  # (B, T)
+    waveform = spec_to_audio(spec, vocoder, state.device)  # (B, T)
 
     wf = waveform.squeeze(0)
     if inst.basis.is_descriptor_basis and inst.profile.waveform_controls:
@@ -200,6 +201,7 @@ async def health() -> dict:
         "status": "ok",
         "device": str(state.device),
         "vocoder": state.vocoder_type,
+        "vocoders": state.vocoders,
         "control": state.control_basis,
         "loaded": state.loaded,
         "cached_responses": len(audio_cache),
@@ -256,7 +258,7 @@ async def config(request: Request) -> dict:
         "display_name": profile.display_name,
         "description": profile.description,
         "sliders": sliders,
-        "vocoder": state.vocoder_type,
+        "vocoder": state.vocoder_type_for(profile),
         "control": state.control_basis,
         "calibration": inst.basis.calibration,
     }
@@ -387,7 +389,7 @@ async def export(
         "instrument": inst.profile.name,
         "sliders": dict(zip(inst.basis.names, positions)),
         "control": state.control_basis,
-        "vocoder": state.vocoder_type,
+        "vocoder": state.vocoder_type_for(inst.profile),
         **{k: v for k, v in request.query_params.items()
            if k in ("attack_ms", "decay_ms", "drive", "filter")},
     }

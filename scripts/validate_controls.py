@@ -25,7 +25,7 @@ from kicks.analysis.evaluation import analyze_hit, build_reference, score_sample
 from kicks.audio.constants import SAMPLE_RATE
 from kicks.audio.controls import correct_waveform
 from kicks.audio.mel import spectrogram
-from kicks.audio.vocoder import load_vocoder, spec_to_audio
+from kicks.audio.vocoder import load_vocoder, resolve_vocoder_type, spec_to_audio
 from kicks.config import get_device, load_vae_from_checkpoint
 from kicks.data import DrumDataset
 from kicks.instruments import get_profile
@@ -34,6 +34,8 @@ from kicks.instruments import get_profile
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--vocoder", choices=("discoder", "bigvgan", "griffinlim"), default=None,
+                        help="default: the profile's own backend (KICKS_VOCODER overrides)")
     parser.add_argument("--instrument", default="kick")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--random", type=int, default=32)
@@ -58,7 +60,8 @@ def main():
     if args.corners:
         points.extend((f"corner_{i}", np.array(p)) for i, p in enumerate(itertools.product((0, 1), repeat=dims)))
     points.extend((f"random_{i}", p) for i, p in enumerate(np.random.default_rng(20260915).uniform(size=(args.random, dims))))
-    vocoder = load_vocoder(device, weights_dir=profile.paths.vocoder_dir)
+    args.vocoder = resolve_vocoder_type(profile, args.vocoder)
+    vocoder = load_vocoder(device, args.vocoder, weights_dir=profile.paths.vocoder_dir)
     reference = build_reference(profile.paths.data_dir, profile)
     rows = []
     for label, position in points:
@@ -101,7 +104,7 @@ def main():
                "p95_target_error": float(np.percentile(np.abs(matrix),95)),
                "axis_response": crosstalk,
                "median_seconds": float(np.median([r["seconds"] for r in rows]))}
-    payload = {"checkpoint": args.checkpoint, "epoch": checkpoint.get("epoch"),
+    payload = {"checkpoint": args.checkpoint, "vocoder": args.vocoder, "epoch": checkpoint.get("epoch"),
                "val_loss": checkpoint.get("val_loss"), "descriptor_keys": profile.descriptor_keys,
                "mins": basis.mins, "maxs": basis.maxs, "calibration": basis.calibration,
                "summary": summary, "results": rows}
