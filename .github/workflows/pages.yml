@@ -1,0 +1,81 @@
+# Builds the static site in web/ and publishes it to GitHub Pages.
+#
+# Repository → Settings → Pages → Source: "GitHub Actions". The public
+# configuration lives in repository *variables* (Settings → Secrets and
+# variables → Actions → Variables) — none of these values is secret, they are
+# compiled into the page, but keeping them out of the repo lets forks deploy
+# their own instance without editing code.
+name: Deploy site to GitHub Pages
+
+# On hold: manual runs only until the Supabase project, Stripe catalogue and
+# repository variables are in place. To go live, add back
+#   push: { branches: [main], paths: ["web/**", ".github/workflows/pages.yml"] }
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - id: pages
+        uses: actions/configure-pages@v5
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm lint
+
+      - run: pnpm build
+        env:
+          # "/<repo>" for project sites, "" for a custom domain.
+          NEXT_PUBLIC_BASE_PATH: ${{ steps.pages.outputs.base_path }}
+          NEXT_PUBLIC_KICKS_API_URL: ${{ vars.KICKS_API_URL }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_CF_ANALYTICS_TOKEN: ${{ vars.CF_ANALYTICS_TOKEN }}
+          NEXT_PUBLIC_LEGAL_NAME: ${{ vars.LEGAL_NAME }}
+          NEXT_PUBLIC_LEGAL_STREET: ${{ vars.LEGAL_STREET }}
+          NEXT_PUBLIC_LEGAL_CITY: ${{ vars.LEGAL_CITY }}
+          NEXT_PUBLIC_LEGAL_EMAIL: ${{ vars.LEGAL_EMAIL }}
+          NEXT_PUBLIC_LEGAL_PHONE: ${{ vars.LEGAL_PHONE }}
+          NEXT_PUBLIC_LEGAL_VAT_ID: ${{ vars.LEGAL_VAT_ID }}
+
+      # Pages runs Jekyll by default, which drops _next/.
+      - run: touch out/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -5,95 +5,228 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Python — install & run
-uv sync                                # Install Python deps
-uv run kicks train                     # Train VAE
-uv run kicks serve                     # Start FastAPI backend (port 8080)
-uv run kicks serve --griffin-lim       # Backend with CPU vocoder
-uv run kicks tui                       # Terminal UI synthesizer
-uv run kicks strip --dry-run           # Preprocess samples (preview)
-uv run kicks strip --backup            # Preprocess samples (with backup)
-uv run kicks cluster                   # Run corpus analysis (GMM + PCA)
-uv run kicks eval                      # Score generated kicks vs corpus (perceptual verdicts)
-uv run kicks clean                     # Quarantine loops/outliers from corpus (dry-run; --apply to move)
-uv run kicks generate                  # Generate kicks (GMM latent prior + best-of-k eval selection)
-uv run kicks fine-tune                 # Fine-tune BigVGAN vocoder
+uv sync                                   # Install dependencies
 
-# Frontend
-cd web && npm install                  # Install JS deps
-cd web && npm run dev                  # Next.js dev server (port 3000)
-cd web && npm run build                # Production build
-cd web && npm run lint                 # Lint frontend
+kicks instruments                         # List profiles + which have a trained model
+kicks strip --dry-run                     # Preprocess corpus (preview)
+kicks strip                               # Isolate hits (backs up by default)
+kicks clean                               # Quarantine loops/outliers (dry run; --apply to move)
+kicks train                               # Train the VAE
+kicks serve                               # REST API on :8080 (the website in web/ is its client)
+kicks serve --griffin-lim                 # CPU vocoder, no model download
+kicks serve --control descriptor          # Sliders target descriptors directly
+kicks generate -n 20 -k 8                 # GMM latent prior + best-of-k eval selection
+kicks eval                                # Score generated output against the corpus
+kicks sweep -n 40                         # Sweep the REST API slider space and score it
+kicks cluster                             # GMM + descriptor PCA report
+kicks publish-analysis                    # Cluster reports -> web/public/analysis/ (no filenames)
 
-# Docker
-docker compose up --build              # Build & run backend + frontend
-docker compose up -d backend           # Backend-only (GPU recommended)
+# Every command takes --instrument / -i (kick | snare | hihat).
+kicks train -i snare -e 300
+
+docker compose up --build                 # API on :8080
+
+cd web && pnpm install && pnpm dev        # Website on :3000 (Next.js 16, shadcn/ui, static export)
+cd web && pnpm lint && pnpm build         # Lint + static export to web/out
 ```
 
 ## Architecture
 
+### The central idea
+
+The pipeline is instrument-agnostic. Kicks, snares and hi-hats share one corpus
+loader, VAE, vocoder and evaluator. Everything that depends on *which drum* is
+being synthesised lives in an `InstrumentProfile` (`kicks/instruments/`).
+
+**When adding behaviour, ask whether it is instrument-dependent. If it is, it
+belongs in the profile, not in an `if instrument == ...` branch.** No module
+outside `kicks/instruments/` should name a drum type.
+
+Dependency direction is one-way: `instruments/` imports only
+`audio/constants`, and everything else imports `instruments/`.
+
 ### Data flow
 
 ```
-.wav kicks → KickDataset (LUFS norm → BigVGAN log-mel → fixed-norm [0,1])
-  → VAE train → latents (32-dim μ) → PCA (5 components) → sliders
-  → slider values → PCA inverse → VAE decode → vocoder → .wav
+.wav → strip/clean → DrumDataset (LUFS → BigVGAN log-mel → fixed-norm [0,1])
+  → VAE train → latents (32-dim µ) → slider basis (PCA or descriptor)
+  → slider values → inverse transform → VAE decode → vocoder → .wav → eval
 ```
 
-### Python package (`kicks/`)
+### `kicks/instruments/` — the profile system
 
-- **`cli.py`** — Typer CLI entry point. All subcommands (`train`, `serve`, `tui`, `cluster`, `strip`, `fine-tune`) are defined here with their `typer.Option` signatures. Each command imports implementation lazily.
-- **`model.py`** — `VAE` class (2D Conv, latent_dim=32 default) + audio constants (`SAMPLE_RATE=44100`, `AUDIO_LENGTH=65536`, `N_FFT=1024`, `HOP_LENGTH=256`, `N_MELS=128`). These constants must stay in sync with BigVGAN's config.
-- **`loss.py`** — Multi-resolution reconstruction (spectral convergence + frequency-weighted L1 at scales 1,2,4) + β·KL with 0.5-nat free bits per dimension. Frequency weights are cached per (n_mels, device). `transient_hf_loss` (weight via `--hf-weight`, default 0.5) adds L1 on the HF click region (bands 50+, first ~35 ms) and a one-sided penalty on excess HF in the tail — targets the eval metrics `hf_click_db` / `hf_tail_ratio_db`.
-- **`dataset.py`** — `KickDataset`: loads .wav → mono → resample → pad/truncate → LUFS norm (-14 dB) → BigVGAN mel spectrogram → fixed-bounds norm [-11.51, 2.5] → [0, 1]. Uses `bigvgan.mel_spectrogram()` so representation matches vocoder input.
-- **`dataloader.py`** — Thin `DataLoader` subclass (`KickDataloader`), an extension point for custom batching.
-- **`train.py`** — `train()` function handles the training loop with cyclical beta annealing, CosineAnnealingLR, 10% validation split, best-checkpoint saving, and loss plots. The CLI passes its defaults to this function. Every `eval_every` (5) epochs it also computes a generative eval-proxy score (decode latents sampled from the val posterior, descriptor realism vs corpus) and saves the best to `vae_best_eval.pth` — checkpoint selection aligned with `kicks eval`, not just pixel loss.
-- **`config.py`** — Device detection (CUDA > MPS > CPU), checkpoint loading with auto-detected latent_dim, path constants. Paths overridable via env vars (`KICKS_DATA_DIR`, `KICKS_MODEL_DIR`, `KICKS_OUTPUT_DIR`).
-- **`vocoder.py`** — Two backends: `load_bigvgan()` (neural, high quality, GPU recommended) and `load_griffin_lim()` (CPU-only, no model download). `spec_to_audio()` dispatches based on vocoder type. Both apply 25 Hz highpass + 20 kHz lowpass + peak normalization. Fine-tuned weights auto-loaded from `models/vocoder/best.pth`.
-- **`server.py`** — FastAPI app with lifespan that loads model + PCA + descriptors on startup. Rate-limited (10 req/s token bucket) with LRU audio cache (100 entries), CORS restricted to `KICKS_CORS_ORIGINS`. Endpoints: `GET /config` (slider definitions), `GET /generate` (audio WAV with optional `attack_ms`, `decay_ms`, `drive`, `filter` params), `GET /spectrogram` (raw spectrogram data). Includes embedded standalone HTML UI at `GET /`.
-- **`tui.py`** — Textual app (`KicksApp`) with synthwave theme. Custom widgets: `SliderBar` (focusable neon sliders), `WaveformDisplay`, `SpectrogramDisplay`, `LogoWidget`, `SunWidget` (retrowave sun art). Loads model async, supports keyboard-driven workflow. Plays audio via `afplay`.
-- **`cluster.py`** — `extract_latents()`, `select_n_clusters()` (BIC), `fit_gmm()`, `compute_descriptors()` (5 perceptual features from spectrogram). Descriptors: sub, punch, click, bright, decay.
-- **`_cluster_cmd.py`** — CLI implementation for clustering. Z-scores latents for GMM, runs PCA on z-scored descriptors (5D→3D), computes correlations, generates per-cluster average audio. Saves to `output/cluster_analysis.json`.
-- **`_strip_cmd.py`** — CLI implementation for preprocessing. Low-frequency envelope + HF onset detection + energy-envelope autocorrelation for loop detection. Default backup is enabled (`--backup`), defaults to non-destructive copy behavior.
-- **`eval.py`** — Automatic perceptual evaluation (`kicks eval`). Waveform-domain metrics (HF decay/tail ratio, tail flatness, onset count, sub pitch, pitch glide, noise floor …) scored against reference-corpus distributions (cached in `output/eval_reference.json` — pass `--refresh-ref` after corpus changes). Translates z-scores/percentiles into ✓/⚠/✗ verdicts, 0–100 score, and a set-level Fréchet distance. numpy/scipy only — no torch import.
-- **`generate.py`** — `kicks generate`. Samples latents from an 8-component GMM fitted on corpus latent µ vectors (aggregate posterior, cached in `models/latent_prior.npz` — pass `--refresh-prior` after retraining) instead of `N(0,1)`, decodes best-of-k candidates per output slot, keeps the highest `eval` score.
-- **`pca_analysis.py`** — Shared slider-basis analysis used by both `server.py` and `tui.py`. Returns `PCAnalysis` dataclass. Two bases: `basis="pca"` (default) fits PCA (5 components), auto-names PCs by descriptor correlation (|r| ≥ 0.15), computes decay decorrelation ratios; `basis="descriptor"` fits `DescriptorBasis` — supervised axes where each slider directly targets one descriptor (sub/punch/click/bright/decay), fit on *decoded* spectrograms when `model` is passed, with closed-loop Newton `solve()` (2 extra VAE decodes) that roughly doubles slider authority (~64% vs ~34% of corpus descriptor span). Enable via `kicks serve --control descriptor` / `KICKS_CONTROL=descriptor`.
-- **`finetune.py`** — BigVGAN GAN fine-tuning. Freezes all but last 2 upsampling blocks. MPD + CQT discriminators. Supports resuming from checkpoints.
+- **`profile.py`** — the data types. `Region` (a rectangle of the spectrogram),
+  `DescriptorSpec` (a slider axis: one of four kinds — `mean`, `log_ratio`,
+  `fraction`, `inverse_ratio` — over one or two regions), `MetricSpec` (an eval
+  metric plus weight and verdict phrasing; `gate=True` means a hard penalty
+  rather than a weighted contribution, `multivariate=False` excludes it from the
+  Mahalanobis/Fréchet stats), `OnsetSpec`, `StripSpec`, `EvalWindows`,
+  `TransientLossSpec`, `PathSpec`, and `InstrumentProfile` tying them together.
+- **`metrics.py`** — `standard_metrics(noun, plural, drop=(), overrides={})`
+  builds the 12-metric set with the instrument's noun substituted in. Profiles
+  drop what does not apply and re-word what reads wrong.
+- **`kick.py` / `snare.py` / `hihat.py`** — one `PROFILE` constant each.
+- **`__init__.py`** — the registry. `get_profile(name)` resolves the argument,
+  then `KICKS_INSTRUMENT`, then the default; it also overlays `KICKS_DATA_DIR` /
+  `KICKS_MODEL_DIR` / `KICKS_OUTPUT_DIR` onto the profile's paths.
 
-### Frontend (`web/`)
+The **kick profile is the reference**: its descriptor windows, strip heuristics
+and metric weights are the ones the trained checkpoint was tuned against, and are
+byte-for-byte the pre-refactor behaviour. Its `PathSpec` uses `subdir=""` so it
+keeps the original flat layout (`models/vae_best.pth`, `output/eval_reference.json`).
+Do not "tidy" those numbers.
 
-- **Next.js 16** app router with shadcn/ui components, Tailwind v4, React 19
-- **3-column layout**: pre-vocoder `SpectrogramVis` | controls | post-vocoder `WaveformViewerVis`
-- **`useSynth` hook** — fetches config from FastAPI backend via Next.js API route proxy (`/api/config`), manages slider state, calls `/api/generate` + `/api/spectrogram`, extracts waveform envelope from generated audio. Uses `AbortController` for in-flight requests.
-- **`useAudioContext` hook** — Shared `AudioContext` singleton across components, lazy creation, release on unmount, handles `suspended` state (user-gesture resume).
-- **`useSequencer` hook** — 16-step drum sequencer with multi-track pattern, BPM control, MIDI input, Web Audio scheduling.
-- **`useClusterData` hook** — Fetches cluster analysis, handles error states, pagination support.
-- **API routes** under `web/app/api/` proxy to the FastAPI backend (port 8080), with path traversal validation.
-- **Preset management** — Save/load/delete slider presets via `localStorage` (`kicks_presets` key).
-- **Keyboard shortcuts** — Space=generate, R=randomize, S=download (ignored when typing in inputs).
-- **Corpus analysis** at `/cluster` page: EDA, PCA variance, scatter plots (2D + 3D), cluster profiles, sample inspector.
-- **Math page** at `/maths`: full pipeline documentation with KaTeX LaTeX equations.
+### `kicks/audio/`
 
-### Key data contracts
+- **`constants.py`** — `SAMPLE_RATE=44100`, `AUDIO_LENGTH=65536`, `N_FFT=1024`,
+  `HOP_LENGTH=256`, `N_MELS=128`, `N_FRAMES=256`, `LOG_MEL_MIN/MAX`,
+  `TARGET_LUFS`. Fixed across instruments so one vocoder and one architecture
+  serve all of them. Must stay in sync with BigVGAN's config.
+- **`waveform.py`** — **numpy/scipy only, no torch import.** `load_audio`,
+  `rms_envelope`, `bandpass`, `band_envelope`, `detect_onsets(x, OnsetSpec)`,
+  `is_loop`, `stft_power`, `band_power`, `apply_fade_out`. Keeping torch out of
+  here is why `kicks eval` and `kicks clean` start instantly — don't import torch
+  into this module or anything it pulls in.
+- **`io.py`** — torch-side loading. `load_waveform()` is the single definition of
+  "how audio enters the model" (mono → resample → fit length → LUFS); the
+  dataset and the latent prior both go through it.
+- **`mel.py`** — BigVGAN log-mel plus `normalize`/`denormalize`.
+- **`effects.py`** — envelope, drive, lowpass for the API's query params.
+- **`vocoder.py`** — `load_vocoder(device, type, weights_dir)` and
+  `spec_to_audio(spec, vocoder, device)`. Both backends share one post-chain:
+  25 Hz highpass, 20 kHz lowpass, peak normalise, `gate_tail`.
 
-- **Spectrogram shape**: `(B, 1, 128, 256)` — normalized to [0, 1]
-- **VAE latent**: 32-dim vector (μ), logvar clamped to [-10, 10]
-- **PCA**: 5 components, fit on corpus latents, slider range = [2nd, 98th] percentile
-- **Checkpoint format**: `{"model": state_dict, "epoch": int, "val_loss": float, "latent_dim": int}`
-- **Vocoder fine-tune weights**: saved as `models/vocoder/best.pth`, loaded automatically if present
-- **Vocoder selection**: `KICKS_VOCODER=griffinlim` env var or `--griffin-lim` flag
-- **Rate limiter**: 10 req/s token bucket (shared across all endpoints)
-- **LRU cache**: 100 entries, keyed by query string, invalidated on server restart
-- **CORS**: single origin by default (`http://localhost:3000`), configurable via `KICKS_CORS_ORIGINS` (comma-separated)
+### `kicks/nn/vae.py`
 
-### Important gotchas
+2D conv VAE. `VAE(latent_dim=32, n_mels=128, n_frames=256)` — the spectrogram
+size is a constructor argument so a short-tail instrument can use fewer frames.
+`checkpoint_meta()` returns the shape metadata to save alongside the weights;
+`config.load_vae_from_checkpoint()` recovers it from older checkpoints by reading
+`fc_mu` and `fc_decode` shapes.
 
-- BigVGAN's `n_fft` was changed from 2048 to **1024** — must match between model constants, dataset, and fine-tuning config. Assertions in `finetune.py` verify this at startup.
-- BigVGAN `from_pretrained` is patched (`_patch_bigvgan_from_pretrained`) for compatibility with huggingface_hub ≥ 1.0. Patch is idempotent.
-- The Griffin-LIM vocoder uses pinverse of the mel filterbank instead of `InverseMelScale` (unsupported on MPS, prone to rank errors on CPU).
-- All spectrogram normalization uses **fixed** bounds `[-11.5129, 2.5]` (derived from BigVGAN's ln clamp), not dataset-dependent min/max.
-- Latent_dim is saved in checkpoints and auto-detected on load — changing latent_dim requires retraining.
-- All `torch.load` calls use `weights_only=True` for security.
-- The standalone HTML UI at `GET /` is embedded in `server.py` as a string constant — update both places on UI changes.
-- `_strip_cmd.py` defaults to `--backup` (non-destructive) — the backup directory is `data/kicks_backup/`.
-- TUI audio playback uses `afplay` (macOS only) — will fail silently on Linux.
+### `kicks/analysis/`
+
+- **`descriptors.py`** — `compute_descriptors(spec, profile)` and friends. Pure
+  profile evaluation; accepts torch tensors or ndarrays of any leading shape.
+- **`latents.py`** — `extract_latents`, `select_n_clusters` (BIC), `fit_gmm`.
+- **`basis.py`** — `analyze_latent_space(latents, specs, profile, basis=...)`
+  returns a `SliderBasis`. `basis="pca"` names components by descriptor
+  correlation and computes cross-talk compensation for
+  `profile.decorrelated_descriptor`; `basis="descriptor"` fits a `DescriptorBasis`
+  with a closed-loop Newton `solve()`. `slider_positions_to_axis_values()` maps
+  [0,1] positions into basis space and applies the decorrelation.
+- **`evaluation.py`** — `analyze_hit(x, profile)`, `build_reference`,
+  `reference_from_rows`, `score_sample`, `frechet_distance`, `run_eval`. numpy/
+  scipy only. The reference cache is fingerprinted on the instrument *and* the
+  corpus contents.
+- **`clustering.py`** — `run_cluster()`, the corpus analysis report.
+
+### `kicks/training/`
+
+- **`loss.py`** — `vae_loss(...)`, multi-resolution reconstruction + beta·KL with
+  free bits, plus `transient_loss(recon, target, TransientLossSpec)`.
+- **`trainer.py`** — the loop. Saves `vae_best.pth` (val loss) *and*
+  `vae_best_eval.pth` (generative eval proxy: decode latents from the val
+  posterior, measure descriptor realism). Both matter; they disagree.
+
+### `kicks/api/`
+
+- **`app.py`** — the FastAPI app. `/health`, `/instruments`, `/config`,
+  `/generate`, `/evaluate`, `/spectrogram`, `/me`, `POST /export`. Every
+  synthesis endpoint takes `instrument`. There is no HTML here — the website is
+  the only UI and lives in `web/`.
+- **`auth.py`** — optional Supabase auth. `Auth.current_user` / `require_user`
+  are FastAPI dependencies; `CreditsClient` calls the Postgres ledger functions
+  (`charge_export`, `refund_export`, `credit_balance`) through PostgREST as the
+  service role. Off unless `KICKS_SUPABASE_URL` is set, so local dev is open.
+- **`state.py`** — `ServerState` loads instruments lazily and keeps them, so one
+  server can serve several drums.
+- **`middleware.py`** — token-bucket `RateLimiter`, `LRUCache`.
+
+### `web/` — the website
+
+Next.js 16 App Router, `output: "export"` (GitHub Pages), Tailwind v4, shadcn/ui
+on Base UI (not Radix: composition is `render={<Link/>}`, not `asChild`).
+
+- **`lib/api/`** — `KicksApi` client + the `Sound` type (instrument, slider
+  positions, effects). `soundQuery()` sorts keys so equal sounds hit the API cache.
+- **`hooks/use-studio.tsx`** — all studio state; `hooks/use-kit.tsx` — the pad
+  bank; `lib/midi.ts` — Web MIDI; `lib/audio/engine.ts` — one AudioContext,
+  decoded-buffer cache.
+- **`components/studio/`** discovers instruments and sliders from the API at
+  load time, so **adding an instrument needs no UI change.** The studio is
+  loaded client-only (`studio-loader.tsx`) — it needs AudioContext, MIDI and
+  localStorage.
+- **`components/analysis/`** renders `public/analysis/*.json` written by
+  `kicks publish-analysis`. Those files carry **no filenames or paths**; keep it
+  that way — the corpus is not public.
+- **`hooks/use-auth.tsx`**, **`lib/billing.ts`** — Supabase session, credits,
+  Stripe Checkout via Edge Functions. Everything degrades gracefully when
+  `NEXT_PUBLIC_SUPABASE_URL` is unset.
+- **`app/legal/*`** — German legal texts; operator details come from
+  `NEXT_PUBLIC_LEGAL_*` (see `lib/legal.ts`) and the pages warn until set.
+- The lint config is React-Compiler-strict (`react-hooks/set-state-in-effect`,
+  refs-in-render): keep effect bodies asynchronous and derive state instead of
+  resetting it in effects.
+
+### `supabase/`
+
+- **`migrations/*_init.sql`** — schema, RLS on every table, the append-only
+  `credit_ledger`, Stripe catalogue mirror, orders, kits, consents, and the
+  `SECURITY DEFINER` functions the API and webhooks call. Orders are detached
+  (not deleted) on account erasure — § 147 AO retention.
+- **`functions/`** — Deno Edge Functions: `create-checkout-session`,
+  `stripe-webhook` (idempotent on event id via `stripe_events`), `billing-portal`,
+  `delete-account`.
+
+### Other
+
+- **`cli.py`** — Typer. Every command takes `--instrument`; implementations are
+  imported lazily so `kicks eval` doesn't wait on torch.
+- **`analysis/publish.py`** — `kicks publish-analysis`: slims the cluster
+  reports for the browser and copies cluster audio into `web/public/analysis/`.
+- **`config.py`** — `get_device()` (CUDA > MPS > CPU) and
+  `load_vae_from_checkpoint()`. Paths live on profiles, not here.
+- **`corpus/strip.py`, `corpus/clean.py`** — corpus preparation.
+- **`synthesis/generator.py`** — GMM latent prior + best-of-k selection.
+- **`sweep.py`** — drives the running REST API and scores every result.
+
+## Key data contracts
+
+- **Spectrogram**: `(B, 1, 128, 256)`, values in [0, 1]
+- **VAE latent**: 32-dim µ by default (per-profile), logvar clamped to [-10, 10]
+- **Checkpoint**: `{"model": state_dict, "instrument": str, "latent_dim": int,
+  "n_mels": int, "n_frames": int, "epoch": int, "val_loss": float}`
+- **Slider count** follows `profile.n_sliders` (one per descriptor) — never
+  assume 5
+- **Slider query params**: `s1..sN`, legacy `pc1..pcN`, or the slider's own
+  lowercased label. Under the PCA basis a slider's label is *discovered at fit
+  time*, so map names through `SliderBasis.names`, not `profile.descriptor_keys`
+- **Rate limiter**: 10 req/s token bucket, shared
+- **LRU cache**: 100 entries keyed on the query string
+- **Export idempotency**: `POST /export` takes `Idempotency-Key: <uuid>`; the
+  ledger has a unique index on it, so a retry returns the same charge
+- **Static-export routes** end in `/` (`trailingSlash: true`); link to `/studio/`,
+  not `/studio`
+- **Vocoder selection**: `KICKS_VOCODER=griffinlim` or `--griffin-lim`
+
+## Important gotchas
+
+- BigVGAN's `n_fft` is **1024**, not 2048 — must match across constants, dataset
+  and vocoder. `load_bigvgan` still picks up any `*.pth` in the profile's
+  `vocoder_dir` (`models/vocoder/checkpoint_100.pth` is the tuned kick vocoder).
+- `BigVGAN.from_pretrained` is patched (`patch_bigvgan_from_pretrained`) for
+  huggingface_hub >= 1.0. Idempotent.
+- Griffin-Lim uses the mel filterbank pseudo-inverse, not `InverseMelScale`
+  (unsupported on MPS, rank-unstable on CPU).
+- Normalisation bounds are **fixed** (`[-11.5129, 3.0]`), not dataset-dependent.
+- `kicks/audio/waveform.py` and `kicks/analysis/evaluation.py` must stay
+  torch-free.
+- The eval reference cache invalidates on instrument *and* corpus fingerprint;
+  `--refresh-ref` forces a rebuild.
+- `corpus/strip.py` backs up by default (`data/<corpus>_backup/`); `clean` moves
+  rather than deletes, with a manifest.
+- Every `torch.load` uses `weights_only=True`.
+- `web/public/analysis/*.json` must never contain corpus filenames or paths.
+- Never put a Supabase service key or Stripe secret anywhere under `web/` —
+  everything there is compiled into the public page.

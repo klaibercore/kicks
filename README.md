@@ -1,384 +1,400 @@
 # kicks
 
-A VAE-powered kick drum synthesizer. Train a convolutional VAE on your kick samples, then generate new kicks in real-time by moving sliders in a web UI, TUI, or REST API.
+A VAE-powered drum synthesizer. Train a convolutional VAE on your samples, then
+generate new one-shots by moving a handful of perceptually meaningful sliders —
+through a REST API, and a website (`web/`) with a studio, a MIDI pad bank,
+corpus analytics and credit-based sample exports.
+
+The pipeline is instrument-agnostic. Kicks, snares and hi-hats all run through
+the same corpus loader, VAE, vocoder and evaluator; what each drum *is* lives in
+an **instrument profile** ([`kicks/instruments/`](kicks/instruments/)). Adding a
+drum type means adding a profile, not editing the pipeline.
 
 ## How it works
 
 ```
-Kick samples (.wav)
-  -> Strip: isolate kick hits, exclude loops
+Samples (.wav)
+  -> strip:  isolate single hits, exclude loops        [profile: onset band, durations]
+  -> clean:  quarantine double-hits and outliers       [profile: onset spacing]
   -> LUFS loudness normalisation (-14 LUFS)
-  -> Log-mel spectrograms (128x256)
-  -> Fixed normalisation [-11.51, 2.5] -> [0, 1]
-  -> Beta-VAE training (beta=0.3, cyclical annealing, free bits)
-  -> Latent vectors (32-dim)
-  -> PCA -> 5 principal components (auto-named by perceptual correlation)
-  -> Slider UI (e.g. Sub, Punch, Click, Bright, Decay)
-  -> PCA inverse -> z vector
+  -> BigVGAN log-mel spectrograms (128 x 256)
+  -> fixed normalisation [-11.51, 3.0] -> [0, 1]
+  -> beta-VAE training, cyclical annealing + free bits [profile: transient loss windows]
+  -> latent vectors (32-dim)
+  -> slider basis: PCA or supervised descriptor axes   [profile: descriptors]
+  -> slider values -> inverse transform -> z
   -> VAE decoder -> spectrogram
-  -> BigVGAN or Griffin-LIM vocoder -> audio
+  -> BigVGAN or Griffin-Lim vocoder -> audio
+  -> eval:   corpus-referenced perceptual verdicts     [profile: metrics, phrasing]
 ```
 
-## Features
+Everything in brackets is what the profile supplies. The stages themselves never
+mention a drum type.
 
-- **VAE synthesis engine** — 2D convolutional beta-VAE trained on log-mel spectrograms
-- **PCA latent space** — 5 intuitive sliders auto-named by perceptual descriptor correlation (sub, punch, click, bright, decay)
-- **Decay decorrelation** — Moving non-Decay sliders no longer changes perceived sample length
-- **Two vocoder backends** — BigVGAN v2 (high quality, GPU) or Griffin-LIM (CPU-only, no model download)
-- **Web UI** — Next.js + shadcn/ui with 3-column layout, waveform/spectrogram visualizers, keyboard shortcuts (Space/R/S)
-- **Preset management** — Save/load slider presets to `localStorage`
-- **Envelope shaper** — Adjust attack/decay via query params (`attack_ms`, `decay_ms`)
-- **Distortion/saturation** — Apply drive and lowpass filter via query params (`drive`, `filter`)
-- **16-step sequencer** — Multi-track drum sequencing with MIDI input and BPM control
-- **Terminal UI** — Synthwave-themed TUI with waveform and spectrogram displays via Textual
-- **Standalone HTML UI** — Embedded in the FastAPI server at `GET /`, no Node.js needed
-- **REST API** — FastAPI backend with rate limiting (10 req/s), LRU audio cache, CORS, input validation
-- **Corpus analysis** — GMM clustering with BIC selection, PCA on perceptual descriptors, interactive dashboard
-- **Preprocessing** — `kicks strip` isolates kick hits from drum loops, detects and excludes loops automatically
-- **Vocoder fine-tuning** — GAN-based fine-tuning of BigVGAN on your kick samples
-- **Docker support** — `docker compose up` for backend + frontend
-- **Shared audio context** — Reuses a single `AudioContext` across all web components
-- **Error states with retry** — Frontend handles connection errors, AbortController cancels stale requests
+## Instruments
+
+| Instrument | Sliders | Corpus | Artefacts |
+|---|---|---|---|
+| `kick` (default) | Sub, Punch, Click, Bright, Decay | `data/kicks` | `models/`, `output/` |
+| `snare` | Body, Crack, Snap, Bright, Decay | `data/snares` | `models/snare/`, `output/snare/` |
+| `hihat` | Attack, Body, Sizzle, Bright, Decay | `data/hihats` | `models/hihat/`, `output/hihat/` |
+
+Every command takes `--instrument` / `-i` and derives its paths from the profile,
+so `kicks train -i snare` reads `data/snares` and writes `models/snare/` with no
+further arguments. `KICKS_INSTRUMENT` sets the default. The kick keeps the
+project's original flat paths, so existing checkpoints and caches keep working.
+
+```bash
+kicks instruments      # what's registered, and which have a trained model
+```
+
+Profiles differ in more than labels. A profile also fixes:
+
+- **descriptor windows** — which mel bands and frames each slider measures,
+- **evaluation metrics** — which are scored, how heavily, and the wording of a
+  failure. A hi-hat drops `sub_hz` and `pitch_glide` outright (an unpitched
+  source has no fundamental to track) and is not penalised for a sustained high
+  end, which for a kick is the worst artefact there is,
+- **eval time windows** — a hi-hat compresses a kick's windows roughly 4x,
+- **onset spacing** — 150 ms for a kick, 45 ms for hi-hat rolls,
+- **strip heuristics** — the band the hit lives in, and the band a *different*
+  instrument would show up in,
+- **transient loss windows** — the band and frames the HF fidelity term guards.
 
 ## Setup
 
 ### Requirements
 
 - Python 3.10+
-- Node.js 18+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
-- Apple Silicon (MPS), CUDA GPU, or CPU
-
-### Install Python dependencies
+- Apple Silicon (MPS), a CUDA GPU, or CPU
 
 ```bash
 uv sync
 ```
 
-Or with pip:
-
-```bash
-pip install -e .
-```
-
-### Install frontend dependencies
-
-```bash
-cd web && npm install
-```
+The website needs Node 22+ and pnpm; see [Website](#website).
 
 ### Add training data
 
-Place `.wav` kick drum samples in `data/kicks/`.
+Drop `.wav` one-shots into the corpus directory for the instrument
+(`data/kicks`, `data/snares`, `data/hihats`). Any sample rate and channel count
+works — everything is resampled to 44.1 kHz mono on load.
 
 ## Usage
 
-### 1. Strip (preprocessing)
+### 1. Prepare the corpus
 
 ```bash
-uv run kicks strip --dry-run     # preview without modifying
-uv run kicks strip               # run with backup (default)
+kicks strip --dry-run              # preview: what would be trimmed
+kicks strip                        # isolate hits (backs up to data/kicks_backup/)
+kicks clean                        # preview quarantine decisions
+kicks clean --apply                # move loops, double-hits and outliers out
 ```
 
-Isolates kick hits from drum loops and full mixes. Detects kick via low-frequency envelope analysis, finds the natural decay endpoint, then fades out and zeros everything after. Automatically detects and excludes cyclical/looping samples (via energy-envelope autocorrelation) by moving them to `data/kicks_loops/`. Uses high-frequency envelope analysis to detect hi-hat/snare onsets that mark the end of the kick.
+`strip` finds the hit in the instrument's own band and truncates at whichever
+comes first: its natural decay, or another instrument entering. `clean` then
+scans with the same analyzer the evaluator uses and quarantines what is not a
+clean one-shot — moved with a manifest, never deleted.
 
-**Default behavior is non-destructive:** originals are backed up to `data/kicks_backup/` before any modification. Loops are copied (not moved) to `data/kicks_loops/`.
-
-Options:
-
-```
---data, -d            Path to sample directory (default: data/kicks)
---dry-run             Analyze without modifying files
---max-duration        Max kick duration in ms (default: 1200)
---min-duration        Min kick duration in ms (default: 50)
---threshold           Decay threshold, fraction of peak (default: 0.01)
---fade-ms             Fade-out length in ms (default: 10)
---backup / --no-backup  Copy originals to backup dir (default: --backup)
---exclude-loops / --keep-loops  Detect and move loops (default: exclude)
---move-loops          Move detected loops out of source dir (default: copy only)
+```bash
+kicks strip -i hihat               # same commands, hi-hat heuristics
 ```
 
 ### 2. Train
 
 ```bash
-uv run kicks train
+kicks train                        # kick, 200 epochs
+kicks train -i snare -e 300        # snare
 ```
 
-Trains for 200 epochs with cyclical beta annealing (4 cycles, beta ramping 0 → 0.3 per cycle) and a cosine annealing learning rate scheduler. Monitors reconstruction loss (multi-resolution spectral convergence + frequency-weighted L1) and KL divergence (with 0.5-nat free bits per dimension) separately. Uses a 10% validation split; saves `models/vae_best.pth` (best validation loss). Generates per-epoch loss plots and output reconstructions/samples.
+Two checkpoints are written, because the two things worth optimizing disagree:
 
-Options:
+- `vae_best.pth` — lowest validation loss. Best reconstruction.
+- `vae_best_eval.pth` — best generative eval proxy: latents sampled from the
+  validation posterior are decoded and their descriptors compared against the
+  corpus distribution. Tracks what a listener notices.
 
-```
---data, -d        Path to training data (default: data/kicks)
---epochs, -e      Number of epochs (default: 200)
---latent-dim      Latent dimension (default: 32)
---beta            KL beta weight (default: 0.3, capped in cyclical annealing)
-```
+A model can reconstruct beautifully and still generate mush, so which one to
+serve is a real choice. Copy the one you want over `vae_best.pth`.
 
-### 3. Fine-tune vocoder (optional)
+### 3. Synthesize
+
+**Server** (REST API at `http://localhost:8080`):
 
 ```bash
-uv run kicks fine-tune
+kicks serve                        # kick, BigVGAN, PCA sliders
+kicks serve -i snare               # snare
+kicks serve --griffin-lim          # CPU-only, no model download
+kicks serve --control descriptor   # sliders target descriptors directly
 ```
 
-Fine-tunes the BigVGAN vocoder on your kick samples using GAN training (generator + multi-period/CQT discriminators). Freezes all but the last 2 upsampling blocks. Saves best/checkpoint/final weights to `models/vocoder/`. Supports resuming from checkpoints automatically. Verifies BigVGAN's mel configuration matches the VAE's audio constants at startup.
+Instruments load lazily, so one server can serve all three once trained — the
+website's instrument tabs just call `/config?instrument=...`.
 
-Options:
-
-```
---data, -d       Path to training data (default: data/kicks)
---epochs, -e     Number of epochs (default: 200)
---batch-size, -b Batch size (default: 2)
---lr             Learning rate (default: 1e-4)
---grad-accum     Gradient accumulation steps (default: 4)
---save-every     Save checkpoint every N epochs (default: 50)
---save-dir       Directory for vocoder checkpoints (default: models/vocoder)
-```
-
-### 4. Synthesize kicks
-
-#### Terminal UI (no browser needed)
+**Batch:**
 
 ```bash
-uv run kicks tui
+kicks generate -n 20 -k 8          # 20 outputs, best of 8 candidates each
+kicks eval                         # score them against the corpus
+kicks sweep -n 40                  # sweep the API's slider space and score every result
 ```
 
-A synthwave-themed synthesizer in your terminal with waveform and spectrogram displays. PCA sliders are auto-named by perceptual correlation (e.g. Sub, Punch, Click, Bright, Decay). Auto-plays audio via `afplay` on macOS.
+`generate` samples from a GMM fitted to the corpus's own latents rather than
+`N(0, 1)` — standard-normal draws land off the data manifold, which is where the
+blobs and double-onsets come from — then keeps the best-scoring of *k* decoded
+candidates per output slot.
 
-| Key | Action |
-|-----|--------|
-| Tab | Switch between sliders |
-| Left/Right | Fine adjust (±2%) |
-| Shift+Left/Right | Coarse adjust (±10%) |
-| Space | Generate & play |
-| P | Replay last |
-| S | Save WAV |
-| R | Randomize |
-| 0 | Reset sliders to 50% |
-| Q | Quit |
-
-#### Web UI
-
-Start the backend and frontend in two terminals:
+### 4. Corpus analysis
 
 ```bash
-# Terminal 1 — FastAPI backend
-uv run kicks serve
+kicks cluster                      # GMM clustering + descriptor PCA -> JSON report
+kicks cluster -i snare && kicks cluster -i hihat
+kicks publish-analysis             # -> web/public/analysis/ for the website
 ```
 
-For systems without a GPU, use the Griffin-LIM vocoder (lower quality, no neural model needed):
+`cluster` writes `output/<instrument>/cluster_analysis.json` plus one averaged
+`.wav` per cluster, so the clusters can be listened to rather than only read.
+`publish-analysis` rewrites those reports for the browser: filenames and paths
+are dropped (the site shows the shape of the corpus, never which recordings are
+in it), GMM memberships collapse to one confidence, floats are rounded.
+
+### 5. Docker
 
 ```bash
-uv run kicks serve --griffin-lim
+docker compose up --build          # API on :8080
 ```
+
+## Website
+
+`web/` is a Next.js 16 + shadcn/ui site, statically exported and deployed to
+GitHub Pages by `.github/workflows/pages.yml`. It is a pure client of the API.
 
 ```bash
-# Terminal 2 — Next.js frontend
-cd web && npm run dev
+cd web
+cp .env.example .env.local         # point NEXT_PUBLIC_KICKS_API_URL at a running `kicks serve`
+pnpm install
+pnpm dev                           # http://localhost:3000
+pnpm build                         # static export -> web/out
 ```
 
-Open [http://localhost:3000](http://localhost:3000). The interface shows a 3-column layout: pre-vocoder spectrogram | slider controls | post-vocoder waveform. Move the sliders to generate kick drums in real-time.
+| Route | What it is |
+|---|---|
+| `/studio/` | Sliders for every trained instrument, post-vocoder shaping, waveform + spectrogram, corpus-referenced realism check, and a 4×4 pad bank playable from the keyboard, the pointer or a MIDI controller (Web MIDI, MIDI learn, velocity). Kits persist locally and, signed in, in the account. |
+| `/analysis/` | Corpus analytics per instrument: PC scatter with cluster isolation, cluster cards with averaged audio, PCA loadings, descriptor correlations, distributions, and a table view. |
+| `/pricing/` | Credit packs from the Stripe catalogue mirror. |
+| `/login/`, `/account/` | Google / GitHub OAuth and e-mail magic links via Supabase; credits, orders, exports, data export and account deletion. |
+| `/legal/*` | Impressum, Datenschutzerklärung, AGB, Widerrufsbelehrung (German). |
 
-**Keyboard shortcuts** (when not typing in inputs):
+### Accounts, credits and payments
 
-- **Space** — Generate new kick
-- **R** — Randomize all sliders
-- **S** — Download current kick as WAV
+Previews are free for signed-in users. `POST /export` renders a 24-bit WAV and
+spends one credit; new accounts start with three. The pieces:
 
-**Preset management:**
+- **Supabase** (`supabase/`): Postgres schema with row-level security on every
+  table, an append-only credit ledger, a Stripe catalogue mirror, orders, saved
+  kits and consent records. Money and credits are only written through
+  `SECURITY DEFINER` functions callable by the service role (`charge_export`,
+  `refund_export`, `fulfill_checkout`, `refund_order`, `erase_user`); users
+  read their own rows and call `credit_balance` / `export_own_data`.
+- **Edge Functions**: `create-checkout-session` (Stripe Checkout with automatic
+  tax, invoice creation, tax-ID collection and the § 356(5) BGB notice),
+  `stripe-webhook` (signature-verified, idempotent on the event id), `billing-portal`,
+  `delete-account` (removes the Stripe customer, then erases the user).
+- **The API** verifies Supabase access tokens locally (JWKS, or a legacy HS256
+  secret) and charges credits through PostgREST as the service role.
 
-- Save: type a name and click "Save" — stored in `localStorage`
-- Load: select from the dropdown and click "Load"
-- Delete: select and click "Del"
+Setup, in order:
 
-**Effects (via query params on the `/generate` endpoint):**
+1. `supabase link --project-ref <ref>` (pick an EU region), `supabase db push`.
+2. Enable Google and GitHub in Authentication → Providers; add
+   `https://<user>.github.io/<repo>/auth/callback/` and
+   `http://localhost:3000/auth/callback/` to the redirect allow-list. For magic
+   links that survive being opened in another browser, use `{{ .TokenHash }}` in
+   the e-mail template: `.../auth/callback/?token_hash={{ .TokenHash }}&type=email`.
+3. In Stripe: complete the business profile (address, VAT ID — the invoices
+   carry them), enable Stripe Tax, create one product per credit pack with a
+   `credits` metadata field and a one-time EUR price (gross, tax-inclusive).
+   Add a webhook endpoint for the events listed in `stripe-webhook/index.ts`.
+   Re-save each product once so the webhook mirrors it.
+4. `cp supabase/functions/.env.example supabase/functions/.env`, fill it in,
+   `supabase secrets set --env-file supabase/functions/.env`,
+   `supabase functions deploy`.
+5. Run the API with `KICKS_SUPABASE_URL` and `KICKS_SUPABASE_SERVICE_KEY` set,
+   and `KICKS_CORS_ORIGINS` including the site's origin.
+6. Set the repository variables the Pages workflow reads (`KICKS_API_URL`,
+   `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `CF_ANALYTICS_TOKEN`, `LEGAL_*`).
 
-- `attack_ms=10` — Apply attack envelope (linear ramp)
-- `decay_ms=200` — Apply decay envelope (linear fade)
-- `drive=0.5` — Saturation/distortion (tanh waveshaping, 0–1)
-- `filter=500` — Lowpass filter cutoff in Hz (40–18000)
+### German law checklist
 
-A standalone HTML UI is also available at [http://localhost:8080](http://localhost:8080) (no Node.js required). The standalone UI does not include sequencer, presets, or effects controls — those are web-only features.
+The site is built for an operator in Germany. What is in place, and what still
+needs a human:
 
-API docs at [http://localhost:8080/docs](http://localhost:8080/docs).
+- **Impressum** (§ 5 DDG) and **Datenschutzerklärung** (Art. 13 DSGVO) are
+  generated from the `LEGAL_*` variables; the pages show a warning until they
+  are set. Have both reviewed by a lawyer before going live — they are a
+  faithful starting point, not legal advice.
+- **Consent** (§ 25 TDDDG): Cloudflare Web Analytics loads only after an opt-in
+  with equal-prominence "only necessary" / "allow analytics" buttons; sign-in
+  tokens are strictly necessary and need none. Fonts are self-hosted.
+- **Commerce**: prices are shown gross "inkl. MwSt." (PAngV), Stripe Tax
+  charges the buyer's rate, invoices are created for every purchase (§ 14
+  UStG), the AGB and Widerrufsbelehrung are accepted before checkout, the
+  § 356(5) BGB waiver is a separate un-ticked checkbox and is logged with
+  the legal-text version, and Stripe's "Zahlen" button is the § 312j order
+  button.
+- **Retention and erasure**: deleting an account removes the Stripe customer
+  and every user row, but detaches rather than deletes orders (§ 147 AO).
+  `export_own_data` covers Art. 15 and 20.
+- The EU ODR platform was discontinued in July 2025; the pages reference § 36
+  VSBG only.
 
-#### 16-Step Sequencer
+## Slider bases
 
-The web UI includes a built-in drum sequencer below the synthesizer controls:
+`--control pca` (default) fits principal components of the corpus latents and
+names each after the descriptor it correlates with most (|r| >= 0.15), flipping
+sign so every slider reads left-to-right as "less" to "more". Honest about the
+data's own structure, but each component moves several descriptors at once, so
+one axis — the profile's `decorrelated_descriptor`, decay by default — gets
+explicit cross-talk compensation.
 
-- Generate a kick, then use the sequencer to build patterns
-- Tracks for your generated kick, with click, clap, hat, snare, rim, and tom samples
-- Adjustable BPM (60–200), play/stop transport
-- MIDI input support for external controllers
-- Click track labels to preview individual sounds
-- Step grid with beat markers and per-track colors
+`--control descriptor` fits a supervised map instead: slider *j* targets
+descriptor *j*, with first-order cross-talk cancelled by construction. A
+closed-loop Newton correction (two extra decodes) roughly doubles slider
+authority over the open-loop linear map, because the decoder's response is
+nonlinear away from the corpus mean.
 
-### 5. Corpus analysis
+## Evaluation
 
-```bash
-uv run kicks cluster
-cd web && npm run dev
-```
+`kicks eval` defines "good" statistically rather than by fixed thresholds: a
+generated hit passes when each perceptual metric falls inside the distribution
+of the same metric over the real corpus. Per-metric robust z-scores become ✓/⚠/✗
+verdicts in plain English, a Mahalanobis distance gives an overall likeness
+percentile, and a Fréchet distance between the generated set and the corpus gives
+one set-level number.
 
-Runs GMM clustering (BIC-selected k) on z-scored latents, PCA on z-scored perceptual descriptors (5D → 3D), and saves analysis to `output/cluster_analysis.json`. Generates per-cluster average audio samples to `output/samples/`. Open [http://localhost:3000/cluster](http://localhost:3000/cluster) to view the corpus analysis dashboard with:
-
-- Exploratory data analysis (summary stats, descriptor correlations, duration distribution, box plots)
-- PCA variance breakdown and principal component cards
-- PC-descriptor correlation matrix
-- 2D scatter plots and interactive 3D visualization
-- Cluster profiles with audio playback
-- Descriptor distributions
-- Sample inspector with waveform and spectrogram views
-- Per-cluster average audio playback
-
-Options:
-
-```
---data, -d     Path to dataset (default: data/kicks)
---samples, -n  Number of samples to cluster (default: all)
-```
-
-### 6. Docker
-
-```bash
-docker compose up --build
-```
-
-Starts both the FastAPI backend (port 8080) and Next.js frontend (port 3000). GPU support is configured in `docker-compose.yml` via `deploy.resources.reservations.devices`. CPU-only fallback works automatically.
-
-Environment variables for Docker:
-
-- `KICKS_DATA_DIR` — Data path inside container (default: `/app/data/kicks`)
-- `KICKS_MODEL_DIR` — Model path (default: `/app/models`)
-- `KICKS_OUTPUT_DIR` — Output path (default: `/app/output`)
-- `KICKS_VOCODER` — Vocoder backend (`bigvgan` or `griffinlim`, default: `bigvgan`)
-- `KICKS_CORS_ORIGINS` — Comma-separated allowed CORS origins (default: `http://localhost:3000`)
-
-Data, models, and output directories are mounted as volumes from the host for persistence.
-
-## Model
-
-2D Convolutional VAE (latent_dim=32 by default).
-
-| Setting | Value |
-|---------|-------|
-| Input | Log-mel spectrogram (1, 128, 256) |
-| Sample rate | 44100 Hz |
-| Audio length | ~1.49s (65536 samples) |
-| N_FFT | 1024 |
-| HOP_LENGTH | 256 |
-| WIN_SIZE | 1024 |
-| N_MELS | 128 |
-| FMIN | 0 |
-| FMAX | None (Nyquist) |
-| Latent dim | 32 (reduced to prevent posterior collapse) |
-| Beta | 0.3 (cyclical annealing, 4 cycles, 0→max ramp per cycle) |
-| Free bits | 0.5 nats per latent dimension |
-| Loss | Multi-resolution (scales 1, 2, 4) frequency-weighted reconstruction + β·KL |
-| Vocoder | BigVGAN v2 (MIT, pretrained at 44kHz) or Griffin-LIM (no GPU needed) |
-| PCA components | 5 (auto-named by perceptual correlation) |
-
-- **Encoder**: 4 conv layers (1 → 32 → 64 → 128 → 256, stride 2, BatchNorm+ReLU), flatten, FC to mu/logvar (logvar clamped to [-10, 10])
-- **Decoder**: FC, reshape, 4 transposed conv layers (mirror encoder), Sigmoid output
-- **Loss**: Multi-resolution spectral convergence + frequency-weighted L1 across 3 scales + β·KL with 0.5-nat free bits per dimension
-- **Optimizer**: Adam (lr=1e-3) with CosineAnnealingLR scheduler
-- **Pre-processing**: LUFS loudness normalisation to -14 LUFS, BigVGAN ln-clamp normalisation [-11.51, 2.5] → [0, 1]
-- **Training**: 10% validation split, best checkpoint saved by val loss
-- **PCA slider naming**: Auto-correlates PCs with perceptual descriptors (sub, punch, click, bright, decay) and flips negative axes; requires |r| ≥ 0.15
-- **Decay decorrelation**: Non-Decay sliders are compensated to prevent cross-talk with the Decay PC
-- **Perceptual descriptors**: Sub-bass energy (bands 0–11), punch (log transient/body ratio in bass region), click (HF transient in bands 40–99), brightness (high/low energy ratio), decay (broadband early-to-late energy ratio)
-- **Vocoder backends**: BigVGAN neural vocoder (high quality, GPU recommended) or Griffin-LIM phase reconstruction (CPU-only, lower quality, no model download)
+Metrics are computed on the final waveform — post-vocoder — because that is what
+the listener hears and where vocoder artefacts actually live. The module imports
+only numpy and scipy, so it starts in well under a second.
 
 ## Project structure
 
 ```
 kicks/
-├── pyproject.toml               # Python project config (uv/pip)
-├── Dockerfile                   # Backend Docker image (FastAPI + BigVGAN)
-├── docker-compose.yml           # Docker Compose (backend + frontend + GPU config)
-├── .python-version              # Python 3.12 (for uv)
-├── .mcp.json                    # MCP server config (shadcn)
-├── main.py                      # Legacy entry point → `kicks train`
-├── app.py                       # Legacy entry point → `kicks serve`
-├── kicks/                       # Core Python package
-│   ├── __init__.py              # Exports: KickDataset, KickDataloader, VAE
-│   ├── cli.py                   # Typer CLI (train, serve, tui, cluster, strip, fine-tune)
-│   ├── tui.py                   # Textual TUI synthesizer (synthwave theme)
-│   ├── server.py                # FastAPI backend + standalone HTML + rate limiter + cache
-│   ├── config.py                # Centralized config & device detection
-│   ├── model.py                 # 2D Conv VAE + audio constants
-│   ├── dataset.py               # Load audio → LUFS norm → log-mel → fixed norm
-│   ├── dataloader.py            # DataLoader wrapper
-│   ├── train.py                 # Training loop with cyclical beta annealing + cosine LR
-│   ├── loss.py                  # Multi-resolution freq-weighted loss + free-bits KL
-│   ├── vocoder.py               # BigVGAN + Griffin-LIM vocoder backends
-│   ├── finetune.py              # BigVGAN vocoder fine-tuning (GAN training)
-│   ├── cluster.py               # GMM, PCA, perceptual descriptors
-│   ├── pca_analysis.py          # Shared PCA analysis (server + TUI)
-│   ├── _cluster_cmd.py          # Cluster command implementation
-│   └── _strip_cmd.py            # Strip command implementation
-├── web/                         # Next.js + shadcn/ui frontend
-│   ├── app/
-│   │   ├── page.tsx             # Synthesizer page (3-column layout + sequencer)
-│   │   ├── cluster/page.tsx     # Corpus analysis dashboard
-│   │   ├── maths/page.tsx       # Signal-processing math (LaTeX docs)
-│   │   └── api/
-│   │       ├── config/          # Slider configuration endpoint proxy
-│   │       ├── generate/        # Audio generation endpoint proxy
-│   │       ├── cluster-data/    # Cluster analysis data
-│   │       ├── cluster-avg/     # Cluster average audio
-│   │       └── play/            # Audio playback endpoint
-│   ├── components/
-│   │   ├── synth/               # Synthesizer widgets (waveform, spectrogram, sequencer)
-│   │   ├── cluster/             # Corpus analysis components (EDA, scatter, 3D, etc.)
-│   │   └── ui/                  # shadcn/ui components (slider, card, badge, etc.)
-│   ├── hooks/                   # Custom React hooks
-│   │   ├── use-synth.ts         # Core synth hook: API calls, presets, keyboard shortcuts
-│   │   ├── use-audio-context.ts # Shared AudioContext singleton hook
-│   │   ├── use-audio.ts         # Audio playback hook
-│   │   ├── use-sequencer.ts     # 16-step drum sequencer hook
-│   │   └── use-cluster-data.ts  # Cluster analysis data fetching hook
-│   ├── types/                   # TypeScript type definitions
-│   └── lib/                     # Shared utilities
-├── data/kicks/                  # Input .wav samples (not tracked)
-├── models/                      # Saved checkpoints (not tracked)
-└── output/                      # Generated audio + analysis (not tracked)
+  instruments/       Instrument profiles — the only place a drum type is named
+    profile.py         Region, DescriptorSpec, MetricSpec, OnsetSpec, StripSpec,
+                       EvalWindows, TransientLossSpec, PathSpec, InstrumentProfile
+    metrics.py         The standard metric set, phrased for a given instrument
+    kick.py  snare.py  hihat.py
+    __init__.py        Registry: get_profile(), available(), register()
+  audio/             Signal processing
+    constants.py       Sample rate, FFT/mel config, normalisation bounds
+    waveform.py        numpy-only: loading, envelopes, onsets, loop detection, STFT
+    io.py              torch-side loading: mono, resample, fit length, LUFS
+    mel.py             BigVGAN log-mel + [0,1] normalisation
+    effects.py         Envelope shaper, drive, lowpass (API query params)
+    vocoder.py         BigVGAN and Griffin-Lim backends
+  data/              DrumDataset, load_spectrogram
+  nn/                VAE (spectrogram size is a constructor argument)
+  training/          loss.py, trainer.py
+  analysis/          descriptors, latents, basis (sliders), evaluation, clustering
+  synthesis/         generator.py — latent prior + best-of-k selection
+  corpus/            strip.py, clean.py
+  api/               app.py (endpoints), auth.py (Supabase tokens + credits), state.py, middleware.py
+  cli.py  config.py  sweep.py
+web/                 Next.js + shadcn/ui site (static export, GitHub Pages)
+supabase/            Schema migration and Stripe Edge Functions
 ```
 
-## Key design decisions
-
-- **Latent_dim=32**: Reduced from 128 to prevent posterior collapse while retaining sufficient capacity for kick drum synthesis.
-- **Multi-resolution loss**: Average-pooling at scales 1, 2, 4 captures both fine transient detail and global spectral envelope.
-- **Frequency-weighted L1**: Linearly decaying weights emphasize lower mel bands where kick drum energy concentrates.
-- **Free bits KL**: Per-dimension KL clamped to 0.5 nats prevents individual latent dimensions from collapsing to zero.
-- **5 PCA components**: A 5th component (Decay) captures the time-domain envelope, providing independent control over sample duration.
-- **Decay decorrelation**: Moving non-Decay sliders no longer changes perceived sample length — Decay PC is automatically compensated via ratios computed from descriptor correlations.
-- **Griffin-LIM fallback**: Uses pseudo-inverse of the mel filterbank instead of `InverseMelScale` (unsupported on MPS, prone to rank errors on CPU).
-- **Fixed spectrogram bounds**: Normalization uses fixed bounds `[-11.5129, 2.5]` (BigVGAN's ln clamp), not dataset-dependent min/max — ensures consistent behavior across datasets.
-- **Z-scored GMM clustering**: Latents are z-score normalized before GMM fitting, preventing magnitude differences from dominating cluster assignments.
-- **CORS restricted to single origin by default**: Configurable via `KICKS_CORS_ORIGINS` environment variable.
-- **Non-destructive strip defaults**: `--backup` is enabled by default; loops are copied, not moved, unless `--move-loops` is specified.
+The dependency direction is one-way: `instruments/` depends on nothing but
+`audio/constants`, and everything else depends on `instruments/`.
 
 ## API
 
-The FastAPI backend exposes the following endpoints:
+Base URL `http://localhost:8080`. Every endpoint takes an optional `instrument`.
 
 | Endpoint | Description |
-|----------|-------------|
-| `GET /` | Standalone HTML UI (embedded, no Node.js needed) |
-| `GET /config` | Slider definitions (names, ranges, defaults) |
-| `GET /generate` | Generate kick audio (WAV) with slider values as query params |
-| `GET /spectrogram` | Raw spectrogram data (2D array) for visualization |
-| `GET /docs` | OpenAPI/Swagger documentation |
+|---|---|
+| `GET /health` | Device, vocoder, control basis, loaded instruments, auth mode |
+| `GET /instruments` | Registered instruments and whether each is trained |
+| `GET /config` | Slider definitions for one instrument |
+| `GET /generate` | Preview WAV for the given slider settings (free, cached) |
+| `GET /evaluate` | Perceptual verdicts + descriptors for the same settings |
+| `GET /spectrogram` | The decoded spectrogram, pre-vocoder |
+| `GET /me` | The signed-in caller and their credit balance |
+| `POST /export` | 24-bit WAV download; spends one credit. `Idempotency-Key: <uuid>` makes retries safe |
 
-**`/generate` query parameters:**
+When `KICKS_SUPABASE_URL` is set, every synthesis endpoint expects
+`Authorization: Bearer <supabase access token>` (`KICKS_AUTH_MODE=optional`
+relaxes that for previews). Without it the server is open and `/export` is
+unavailable.
 
-- `pc1`...`pc5` — Slider positions (0–1, default: 0.5)
-- `attack_ms` — Attack envelope duration in ms
-- `decay_ms` — Decay envelope duration in ms
-- `drive` — Distortion/saturation amount (0–1)
-- `filter` — Lowpass filter cutoff frequency (40–18000 Hz)
+Sliders accept three spellings: positional `s1..sN`, legacy `pc1..pcN`, or the
+slider's own label (`?click=0.8&sub=0.3`). Anything omitted defaults to centre.
+`/generate` also accepts `attack_ms`, `decay_ms`, `drive` (0-1) and `filter`
+(lowpass cutoff in Hz). `/evaluate` scores exactly the audio `/generate` returns,
+shaping included.
+
+```bash
+curl "localhost:8080/generate?click=0.8&decay=0.2" -o kick.wav
+curl "localhost:8080/evaluate?instrument=snare&crack=0.9" | jq .grade
+```
+
+Rate limited to 10 req/s (token bucket, shared) with a 100-entry LRU cache keyed
+on the query string. CORS is a single origin by default, set via
+`KICKS_CORS_ORIGINS`.
+
+## Configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KICKS_INSTRUMENT` | `kick` | Default instrument |
+| `KICKS_DATA_DIR` | `data` | Corpus root |
+| `KICKS_MODEL_DIR` | `models` | Checkpoint root |
+| `KICKS_OUTPUT_DIR` | `output` | Output root |
+| `KICKS_VOCODER` | `bigvgan` | `bigvgan` or `griffinlim` |
+| `KICKS_CONTROL` | `pca` | `pca` or `descriptor` |
+| `KICKS_CORS_ORIGINS` | `http://localhost:3000` | Comma-separated |
+| `KICKS_SUPABASE_URL` | unset | Enables accounts; tokens verified via JWKS |
+| `KICKS_SUPABASE_SERVICE_KEY` | unset | Enables `/export` credit charging |
+| `KICKS_SUPABASE_JWT_SECRET` | unset | Legacy HS256 projects only |
+| `KICKS_AUTH_MODE` | `required` if URL set, else `off` | `required`, `optional`, `off` |
+
+## Adding an instrument
+
+1. Copy `kicks/instruments/snare.py` and adjust the descriptor regions, metric
+   overrides, eval windows, onset spacing and strip bands.
+2. Register it in `kicks/instruments/__init__.py`.
+3. `kicks strip -i yours && kicks clean -i yours --apply && kicks train -i yours`.
+
+No other module needs to change.
+
+## Model
+
+2D convolutional beta-VAE on `(B, 1, 128, 256)` log-mel spectrograms, four
+stride-2 stages (32/64/128/256 channels) down to an 8x16 bottleneck, mirrored
+transposed-conv decoder with a sigmoid output. Latent dim is recorded in the
+checkpoint and auto-detected on load. Spectrogram size is a constructor argument,
+so a short-tail instrument can train on fewer frames without a second model class.
+
+Loss: multi-resolution frequency-weighted reconstruction (spectral convergence +
+energy-weighted L1 at scales 1, 2, 4) + beta * KL with per-dimension free bits,
+plus the profile's transient fidelity term.
+
+## Key design decisions
+
+- **BigVGAN's `mel_spectrogram()` for the dataset** — the VAE learns exactly the
+  representation the vocoder was trained to invert. `n_fft` is 1024, not 2048,
+  and must match across the constants, the dataset and the vocoder.
+- **Fixed normalisation bounds**, not dataset min/max — the model's output scale
+  is tied to them, so a corpus change must not silently rescale the target.
+- **Tail gating** — neural vocoders leave a ~-90 dBFS noise floor where real
+  samples decay into true silence; the exposed hiss is the most audible artefact,
+  so the tail is faded to digital zero.
+- **`weights_only=True`** on every `torch.load`.
+- **Griffin-Lim via mel-filterbank pseudo-inverse**, not `InverseMelScale`, which
+  is unsupported on MPS and rank-unstable on CPU.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
