@@ -219,17 +219,21 @@ def _sha256(path: str) -> str:
 # Rendering (imports torch lazily)
 # ---------------------------------------------------------------------------
 
-def _validation_indices(dataset, run_config: dict) -> list[int] | None:
-    """Reproduce a run's validation split; None when the corpus no longer matches."""
+def _validation_indices(dataset, seed: int | None, val_split: float | None,
+                        fingerprint: str | None = None) -> list[int] | None:
+    """Reproduce the trainer's validation split (same seed, ratio and sorted listing).
+
+    With ``fingerprint`` (from a run record) the corpus must still match it;
+    without one the caller vouches that the corpus is the one that was trained on.
+    """
     import torch
     from torch.utils.data import random_split
 
     from ..training.tracking import split_fingerprint
 
-    seed, val_split = run_config.get("seed"), run_config.get("val_split")
-    if seed is None or val_split is None or not run_config.get("split_fingerprint"):
+    if seed is None or val_split is None:
         return None
-    if split_fingerprint(dataset, seed, val_split) != run_config["split_fingerprint"]:
+    if fingerprint is not None and split_fingerprint(dataset, seed, val_split) != fingerprint:
         return None
     n_val = max(1, min(len(dataset) - 1, int(len(dataset) * val_split)))
     _, val_set = random_split(dataset, [len(dataset) - n_val, n_val],
@@ -274,8 +278,16 @@ def run_fidelity(
     runs_dir: str | None = None,
     seed: int = 20260916,
     note: str = "",
+    split_seed: int | None = None,
+    val_split: float = 0.1,
 ) -> dict:
-    """Render, measure and write the fidelity report; attach it to a run when asked."""
+    """Render, measure and write the fidelity report; attach it to a run when asked.
+
+    Hits come from the run's held-out validation split when ``run_id`` is given
+    and the corpus still matches its fingerprint; from the split ``split_seed`` /
+    ``val_split`` would have produced for a model trained before tracking
+    existed; otherwise from the whole corpus.
+    """
     import soundfile as sf
     import torch
 
@@ -305,20 +317,25 @@ def run_fidelity(
     if run_id:
         run_dir = find_run(runs_root(runs_dir, profile.paths.output_root), run_id)
         run = read_run(run_dir)
-    held_out = _validation_indices(dataset, run["config"]) if run else None
+    if run:
+        held_out = _validation_indices(dataset, run["config"].get("seed"), run["config"].get("val_split"),
+                                       run["config"].get("split_fingerprint") or "missing")
+        if held_out is None:
+            print("Run split not reproducible on this corpus (data changed?) — sampling the whole corpus instead", flush=True)
+    else:
+        held_out = _validation_indices(dataset, split_seed, val_split)
     pool = held_out if held_out is not None else list(range(len(dataset)))
     rng = random.Random(seed)
     indices = sorted(rng.sample(pool, min(count, len(pool))))
-    if run and held_out is None:
-        print("Run split not reproducible on this corpus (data changed?) — sampling the whole corpus instead", flush=True)
 
     vocoder_type = resolve_vocoder_type(profile, vocoder)
     voc = load_vocoder(device, vocoder_type, weights_dir=profile.paths.vocoder_dir)
     meter = io.make_meter()
     hf_band = (2000.0, None)
 
-    print(f"Rendering {len(indices)} {profile.plural} with {vocoder_type}"
-          f"{' from the run’s validation split' if held_out is not None else ''}...", flush=True)
+    origin = ("the run’s validation split" if run and held_out is not None
+              else f"the seed-{split_seed} validation split" if held_out is not None else "the whole corpus")
+    print(f"Rendering {len(indices)} {profile.plural} with {vocoder_type} from {origin}...", flush=True)
     samples, pairs = [], []
     started = time.monotonic()
     for pair_index, idx in enumerate(indices, 1):
@@ -404,7 +421,8 @@ def run_fidelity(
         "instrument": profile.name, "corpus": str(Path(data).resolve()), "checkpoint": str(Path(checkpoint).resolve()),
         "checkpoint_sha256": _sha256(checkpoint), "epoch": ckpt.get("epoch"), "val_loss": ckpt.get("val_loss"),
         "architecture": getattr(model, "architecture", None), "vocoder": vocoder_type,
-        "run_id": run["id"] if run else None, "held_out": held_out is not None,
+        "run_id": run["id"] if run else None, "held_out": held_out is not None, "hit_origin": origin,
+        "hits": [os.path.basename(dataset.paths[i]) for i in indices],
         "windows": {"attack_ms": [0.0, profile.eval_windows.click_ms],
                     "body_ms": [profile.eval_windows.click_ms, profile.eval_windows.body_ms[1]]},
         "method": METHOD, "created_at": datetime.now(timezone.utc).isoformat(),

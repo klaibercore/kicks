@@ -194,12 +194,15 @@ def fidelity(
     runs_dir: str = typer.Option(None, "--runs-dir", help="Training records root (default: output/training or KICKS_RUNS_DIR)"),
     seed: int = typer.Option(20260916, "--seed", help="Sample selection and pair-order seed"),
     note: str = typer.Option("", "--note", help="Short note stored with the attached report"),
+    split_seed: int = typer.Option(None, "--split-seed", help="Without --run: measure on the validation split this training seed produced (corpus must be unchanged since)"),
+    val_split: float = typer.Option(0.1, "--val-split", help="Validation ratio that split used"),
 ) -> None:
     """Measure rendered audio against matched references; write blind A/B pairs."""
     from kicks.analysis.fidelity import run_fidelity
 
     run_fidelity(instrument=instrument, checkpoint=checkpoint, data=data, out_dir=out, count=count,
-                 generate=generate, vocoder=vocoder, run_id=run, runs_dir=runs_dir, seed=seed, note=note)
+                 generate=generate, vocoder=vocoder, run_id=run, runs_dir=runs_dir, seed=seed, note=note,
+                 split_seed=split_seed, val_split=val_split)
 
 
 @app.command()
