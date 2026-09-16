@@ -15,6 +15,8 @@ to serve is a real choice rather than a formality.
 from __future__ import annotations
 
 import os
+import math
+import time
 
 import matplotlib
 import numpy as np
@@ -34,6 +36,8 @@ from ..analysis.descriptors import descriptor_matrix
 from ..instruments import InstrumentProfile
 from ..nn import VAE
 from .loss import vae_loss
+from .metrics import DetailMetrics
+from .tracking import TrainingRun, track_training
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -88,6 +92,7 @@ def _cyclical_beta(epoch: int, beta: float, anneal_epochs: int, cycles: int) -> 
     return beta * min(1.0, ((epoch % cycle_len) / cycle_len) * 2)
 
 
+@track_training
 def train(
     model: VAE,
     dloader: DataLoader,
@@ -105,6 +110,15 @@ def train(
     eval_every: int = 5,
     seed: int = 42,
     source_checkpoint: str | None = None,
+    hf_detail_weight: float = 0.0,
+    attack_change_weight: float = 0.0,
+    *,
+    run_name: str | None = None,
+    intent: str = "",
+    hypothesis: str = "",
+    success_criteria: str = "",
+    runs_dir: str | None = None,
+    tracker: TrainingRun | None = None,
 ) -> dict[str, list[float]]:
     """Train the VAE. Returns per-epoch average loss, recon and kl."""
     paths = profile.paths
@@ -116,6 +130,8 @@ def train(
     model.to(device)
 
     dataset = dloader.dataset
+    if epochs < 1 or eval_every < 0:
+        raise ValueError("epochs must be positive and eval_every non-negative")
     if len(dataset) < 2 or not 0 < val_split < 1:
         raise ValueError("training needs at least two samples and a validation split in (0, 1)")
     n_val = max(1, min(len(dataset) - 1, int(len(dataset) * val_split)))
@@ -125,21 +141,32 @@ def train(
     train_loader = DataLoader(train_set, batch_size=dloader.batch_size, shuffle=True,
                               generator=torch.Generator().manual_seed(seed))
     val_loader = DataLoader(val_set, batch_size=dloader.batch_size, shuffle=False)
+    tracker.record["config"].update(train_samples=len(train_set), val_samples=len(val_set))
+    tracker.progress(phase="reference statistics", force=True)
 
     best_val_loss = float("inf")
     best_proxy = float("inf")
     desc_mean, desc_std = _corpus_descriptor_stats(train_set, profile)
 
-    def _loss(recon, data, mu, logvar, b):
+    def _loss(recon, data, mu, logvar, b, terms=None):
         return vae_loss(
             recon, data, mu, logvar, beta=b, free_bits=free_bits,
             transient=profile.transient_loss, transient_weight=transient_weight,
+            hf_detail_weight=hf_detail_weight, attack_change_weight=attack_change_weight,
+            terms=terms,
         )
+
+    def _accumulate(sums: dict[str, float], terms: dict[str, float], n: int):
+        for name, value in terms.items():
+            sums[name] = sums.get(name, 0.0) + value * n
 
     def _save(path: str, **extra) -> None:
         torch.save({"model": model.state_dict(), "instrument": profile.name,
                     "training": {"seed": seed, "beta": beta, "free_bits": free_bits,
                                  "source_checkpoint": source_checkpoint,
+                                 "hf_detail_weight": hf_detail_weight,
+                                 "attack_change_weight": attack_change_weight,
+                                 "run_id": tracker.id,
                                  "preprocessing": "peak_safe_lufs_v1",
                                  "validation": "posterior_mean_fixed_beta_v1"},
                     **model.checkpoint_meta(), **extra}, path)
@@ -147,22 +174,46 @@ def train(
     def _validate():
         model.eval()
         total, count, mus, logvars = 0.0, 0, [], []
+        reconstruction, kl_sum = 0.0, 0.0
+        term_sums: dict[str, float] = {}
+        detail = DetailMetrics(model.n_mels, profile.transient_loss)
         with torch.no_grad():
-            for data in val_loader:
+            for batch_index, data in enumerate(val_loader, 1):
                 data = data.to(device)
                 mu, logvar = model.encode(data)
                 # Compare every epoch with the same objective and the same
                 # posterior means. Annealed beta and random validation draws
                 # previously made "best" checkpoints incomparable.
-                vl, _, _ = _loss(model.decode(mu), data, mu, logvar, beta)
+                decoded = model.decode(mu)
+                terms: dict[str, float] = {}
+                vl, vr, vk = _loss(decoded, data, mu, logvar, beta, terms)
+                if not math.isfinite(vl.item()):
+                    raise FloatingPointError("Validation loss became non-finite")
+                _accumulate(term_sums, terms, len(data))
                 total += vl.item() * len(data)
+                reconstruction += vr.item() * len(data)
+                kl_sum += vk.item() * len(data)
+                detail.update(decoded, data)
                 count += len(data)
                 mus.append(mu)
                 logvars.append(logvar)
-        return total / count, mus, logvars
+                tracker.progress(batch=batch_index, batches=len(val_loader))
+        mu_all, logvar_all = torch.cat(mus), torch.cat(logvars)
+        kl_per_dim = -0.5 * (1 + logvar_all - mu_all.pow(2) - logvar_all.exp()).mean(0)
+        metrics = {**detail.compute(), "val_reconstruction": reconstruction / count,
+                   "val_kl": kl_sum / count, "active_dims": int((kl_per_dim > 0.01).sum().item()),
+                   "raw_kl": float(kl_per_dim.sum()), "mean_kl": float(kl_per_dim.mean()),
+                   **{f"val_term_{name}": value / count for name, value in term_sums.items()}}
+        return total / count, mus, logvars, metrics
 
+    tracker.progress(phase="baseline validation", force=True)
+    baseline, _, _, baseline_metrics = _validate()
+    tracker.epoch({"epoch": 0, "val_loss": baseline, **baseline_metrics,
+                   "learning_rate": optimizer.param_groups[0]["lr"],
+                   "beta": _cyclical_beta(0, beta, beta_anneal_epochs, beta_cycles),
+                   "elapsed_seconds": time.monotonic() - tracker.started})
     if source_checkpoint is not None:
-        best_val_loss, _, _ = _validate()
+        best_val_loss = baseline
         _save(paths.checkpoint, epoch=0, val_loss=best_val_loss)
         print(f"Fine-tune baseline validation: {best_val_loss:.6f}", flush=True)
 
@@ -180,22 +231,35 @@ def train(
         )
 
         for epoch in range(epochs):
+            epoch_start = time.monotonic()
             current_beta = _cyclical_beta(epoch, beta, beta_anneal_epochs, beta_cycles)
+            learning_rate = optimizer.param_groups[0]["lr"]
+            tracker.progress(phase="training", epoch=epoch + 1, batch=0,
+                             batches=len(train_loader), force=True)
 
             model.train()
             batch_loss, batch_recon, batch_kl = [], [], []
-            for data in train_loader:
+            batch_sizes = []
+            train_terms: dict[str, float] = {}
+            for batch_index, data in enumerate(train_loader, 1):
                 data = data.to(device)
                 optimizer.zero_grad()
                 recon, mu, logvar = model(data)
-                l, recon_l, kl = _loss(recon, data, mu, logvar, current_beta)
+                terms = {}
+                l, recon_l, kl = _loss(recon, data, mu, logvar, current_beta, terms)
+                if not math.isfinite(l.item()):
+                    raise FloatingPointError("Training loss became non-finite")
+                _accumulate(train_terms, terms, len(data))
                 batch_loss.append(l.item())
                 batch_recon.append(recon_l.item())
                 batch_kl.append(kl.item())
+                batch_sizes.append(len(data))
                 l.backward()
                 optimizer.step()
+                tracker.progress(batch=batch_index, train_loss=batch_loss[-1],
+                                 learning_rate=learning_rate, beta=current_beta)
 
-            avg = lambda xs: sum(xs) / len(xs) if xs else 0.0  # noqa: E731
+            avg = lambda xs: float(np.average(xs, weights=batch_sizes)) if xs else 0.0  # noqa: E731
             avg_loss, avg_recon, avg_kl = avg(batch_loss), avg(batch_recon), avg(batch_kl)
             epoch_loss.append(avg_loss)
             epoch_recon.append(avg_recon)
@@ -205,7 +269,8 @@ def train(
             progress.update(task, advance=1, epoch=epoch + 1,
                             loss=avg_loss, recon=avg_recon, kl=avg_kl)
 
-            val_loss, mus, logvars = _validate()
+            tracker.progress(phase="validation", batch=0, batches=len(val_loader), force=True)
+            val_loss, mus, logvars, validation_metrics = _validate()
 
             # Latent diagnostics: per-dim KL over the validation set says how many
             # dimensions actually carry information versus collapsing to the
@@ -213,22 +278,20 @@ def train(
             mu_all = None
             if mus:
                 mu_all = torch.cat(mus, dim=0)
-                logvar_all = torch.cat(logvars, dim=0)
-                kl_per_dim = -0.5 * (
-                    1 + logvar_all - mu_all.pow(2) - logvar_all.exp()
-                ).mean(0)
                 progress.console.log(
                     f"epoch {epoch + 1}: val_loss={val_loss:.4f}  beta={current_beta:.4f}  "
-                    f"active_dims={int((kl_per_dim > 0.01).sum().item())}/{model.latent_dim}  "
-                    f"raw_kl={float(kl_per_dim.sum()):.3f}  "
-                    f"mean_kl/dim={float(kl_per_dim.mean()):.3f}"
+                    f"active_dims={validation_metrics['active_dims']}/{model.latent_dim}  "
+                    f"raw_kl={validation_metrics['raw_kl']:.3f}  "
+                    f"mean_kl/dim={validation_metrics['mean_kl']:.3f}"
                 )
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 _save(paths.checkpoint, epoch=epoch + 1, val_loss=val_loss)
 
-            if mu_all is not None and eval_every > 0 and (epoch + 1) % eval_every == 0:
+            proxy = None
+            if mu_all is not None and len(mu_all) > 1 and eval_every > 0 and (epoch + 1) % eval_every == 0:
+                tracker.progress(phase="generative evaluation", force=True)
                 proxy = _eval_proxy_score(
                     model, mu_all.cpu(), desc_mean, desc_std, profile, device,
                 )
@@ -240,6 +303,17 @@ def train(
                     marker = f"  (new best -> {os.path.basename(paths.eval_checkpoint)})"
                 progress.console.log(f"epoch {epoch + 1}: eval_proxy={proxy:.3f}{marker}")
 
+            n_train = sum(batch_sizes)
+            tracker.epoch({"epoch": epoch + 1, "train_loss": avg_loss,
+                           "train_reconstruction": avg_recon, "train_kl": avg_kl,
+                           **{f"train_term_{name}": value / n_train for name, value in train_terms.items()},
+                           "val_loss": val_loss, **validation_metrics,
+                           "eval_proxy": proxy, "beta": current_beta,
+                           "learning_rate": learning_rate,
+                           "epoch_seconds": time.monotonic() - epoch_start,
+                           "elapsed_seconds": time.monotonic() - tracker.started})
+
+    tracker.progress(phase="saving artifacts", force=True)
     _save(paths.final_checkpoint, epoch=epochs, loss_history=epoch_loss)
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))

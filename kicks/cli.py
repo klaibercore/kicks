@@ -61,11 +61,20 @@ def train(
     beta_cycles: int = typer.Option(4, "--beta-cycles", help="Number of cyclical beta annealing cycles"),
     batch_size: int = typer.Option(32, "--batch-size", "-b", help="Batch size"),
     transient_weight: float = typer.Option(None, "--transient-weight", help="Override the profile's transient-fidelity loss weight (0 = off)"),
+    hf_detail_weight: float = typer.Option(0.0, "--hf-detail-weight", min=0.0, help="Symmetric reference-weighted HF detail loss (stage-2 experiment; 0 = off)"),
+    attack_change_weight: float = typer.Option(0.0, "--attack-change-weight", min=0.0, help="Frame-to-frame attack change matching loss (stage-2 experiment; 0 = off)"),
+    residual: bool = typer.Option(False, "--residual", help="Residual block after every conv stage (stage-3 experiment; new models only)"),
+    latent_skips: bool = typer.Option(False, "--latent-skips", help="Inject the latent at every decoder scale (stage-3 experiment; new models only)"),
     preview: int = typer.Option(10, "--preview", help="Reconstructions and samples to render after training (0 = skip)"),
     resume: str = typer.Option(None, "--resume", help="Fine-tune this checkpoint with a fresh optimizer"),
     learning_rate: float = typer.Option(None, "--learning-rate", help="Defaults to 1e-4 for fine-tuning, 1e-3 for a new model"),
     model_dir: str = typer.Option(None, "--model-dir", help="Output model root (use a separate directory for candidate weights)"),
     seed: int = typer.Option(42, "--seed", help="Reproducible training and validation split"),
+    run_name: str = typer.Option(None, "--run-name", help="Name shown in the training dashboard"),
+    intent: str = typer.Option("", "--intent", help="Audible problem this experiment should solve"),
+    hypothesis: str = typer.Option("", "--hypothesis", help="What changed and why it should help"),
+    success_criteria: str = typer.Option("", "--success-criteria", help="Metrics and listening checks required for success"),
+    runs_dir: str = typer.Option(None, "--runs-dir", help="Training records root (default: output/training or KICKS_RUNS_DIR)"),
 ) -> None:
     """Train the VAE for one instrument."""
     import os
@@ -95,9 +104,12 @@ def train(
     os.makedirs(profile.paths.model_dir or ".", exist_ok=True)
     os.makedirs(profile.paths.output_dir or ".", exist_ok=True)
 
+    if resume and (residual or latent_skips):
+        raise typer.BadParameter("--residual/--latent-skips describe a new model; a resumed checkpoint keeps its own architecture")
+
     device = get_device()
     model = (load_vae_from_checkpoint(resume, device)[0] if resume
-             else VAE(latent_dim=latent_dim).to(device))
+             else VAE(latent_dim=latent_dim, residual=residual, latent_skips=latent_skips).to(device))
     dataset = DrumDataset(data, profile, n_frames=model.n_frames)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     lr = learning_rate if learning_rate is not None else (1e-4 if resume else 1e-3)
@@ -107,7 +119,8 @@ def train(
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
 
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Model: {n_params:,} parameters, latent_dim={model.latent_dim}, device={device}")
+    print(f"Model: {n_params:,} parameters, latent_dim={model.latent_dim}, device={device}, "
+          f"residual={model.residual}, latent_skips={model.latent_skips}")
 
     train_loop(
         model, dataloader, optimizer, profile,
@@ -116,6 +129,9 @@ def train(
         beta_anneal_epochs=0 if resume else epochs, beta_cycles=beta_cycles,
         scheduler=scheduler, transient_weight=transient_weight,
         seed=seed, source_checkpoint=resume,
+        hf_detail_weight=hf_detail_weight, attack_change_weight=attack_change_weight,
+        run_name=run_name, intent=intent, hypothesis=hypothesis,
+        success_criteria=success_criteria, runs_dir=runs_dir,
     )
 
     if preview > 0:
@@ -143,6 +159,71 @@ def train(
         print(f"Wrote reconstructions and samples to {out_dir}/")
 
     print("Done!")
+
+
+@app.command()
+def dashboard(
+    port: int = typer.Option(6060, "--port", "-p", min=1, max=65535, help="Local dashboard port"),
+    runs_dir: str = typer.Option(None, "--runs-dir", help="Training records root (default: output/training or KICKS_RUNS_DIR)"),
+) -> None:
+    """View live training KPIs, compare runs and edit experiment notes."""
+    from kicks.training.tracking import dashboard_server, runs_root
+
+    root = runs_root(runs_dir)
+    server = dashboard_server(root, port)
+    print(f"Training dashboard: http://127.0.0.1:{port}", flush=True)
+    print(f"Reading runs from {root.resolve()}", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+@app.command()
+def fidelity(
+    instrument: str = INSTRUMENT,
+    checkpoint: str = typer.Option(None, "--checkpoint", "-c", help="VAE weights to audit (default: the instrument's served checkpoint)"),
+    data: str = typer.Option(None, "--data", "-d", help="Corpus directory (default: the instrument's)"),
+    out: str = typer.Option(None, "--out", "-o", help="Report directory (default: output/<instrument>/fidelity/<timestamp>)"),
+    count: int = typer.Option(16, "--count", "-n", min=1, help="Corpus hits to reconstruct and pair for listening"),
+    generate: int = typer.Option(8, "--generate", min=0, help="Fresh generations from the latent prior (0 = skip)"),
+    vocoder: str = typer.Option(None, "--vocoder", help="discoder | bigvgan | griffinlim (default: the profile's own)"),
+    run: str = typer.Option(None, "--run", help="Training run ID (or unique prefix) to attach the report to; also selects its held-out split"),
+    runs_dir: str = typer.Option(None, "--runs-dir", help="Training records root (default: output/training or KICKS_RUNS_DIR)"),
+    seed: int = typer.Option(20260916, "--seed", help="Sample selection and pair-order seed"),
+    note: str = typer.Option("", "--note", help="Short note stored with the attached report"),
+) -> None:
+    """Measure rendered audio against matched references; write blind A/B pairs."""
+    from kicks.analysis.fidelity import run_fidelity
+
+    run_fidelity(instrument=instrument, checkpoint=checkpoint, data=data, out_dir=out, count=count,
+                 generate=generate, vocoder=vocoder, run_id=run, runs_dir=runs_dir, seed=seed, note=note)
+
+
+@app.command()
+def promote(
+    instrument: str = INSTRUMENT,
+    checkpoint: str = typer.Option(..., "--checkpoint", "-c", help="Candidate weights to adopt as the served model"),
+    run: str = typer.Option(..., "--run", help="Training run ID (or unique prefix) the decision belongs to"),
+    decision: str = typer.Option("", "--decision", help="Written decision (default: the run's notebook decision)"),
+    runs_dir: str = typer.Option(None, "--runs-dir", help="Training records root (default: output/training or KICKS_RUNS_DIR)"),
+    allow_missing_evidence: bool = typer.Option(False, "--allow-missing-evidence", help="Promote without an attached fidelity and controls report"),
+) -> None:
+    """Adopt a candidate checkpoint, recording decision, evidence and checkpoint identity."""
+    import json
+
+    from kicks.instruments import get_profile
+    from kicks.training.promotion import PromotionRefused, promote as promote_checkpoint
+
+    try:
+        summary = promote_checkpoint(get_profile(instrument), checkpoint, run, decision=decision,
+                                     runs_dir=runs_dir, allow_missing_evidence=allow_missing_evidence)
+    except (PromotionRefused, FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    print(json.dumps(summary, indent=2))
+    print("Restart `kicks serve` to pick up the new weights; the slider calibration refits on first use.")
 
 
 @app.command()

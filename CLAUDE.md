@@ -12,6 +12,11 @@ kicks strip --dry-run                     # Preprocess corpus (preview)
 kicks strip                               # Isolate hits (backs up by default)
 kicks clean                               # Quarantine loops/outliers (dry run; --apply to move)
 kicks train                               # Train the VAE
+kicks train --hf-detail-weight 0.5 --attack-change-weight 0.25   # Stage-2 loss experiment
+kicks train --residual --latent-skips     # Stage-3 architecture experiment (new models only)
+kicks dashboard                           # Local training KPIs + notebook on :6060
+kicks fidelity --run <id>                 # Waveform fidelity report + blind A/B pairs, attached to a run
+kicks promote --run <id> -c <cand.pth>    # Adopt a candidate; needs a decision + attached evidence
 kicks serve                               # REST API on :8080 (the website in web/ is its client)
 kicks serve --griffin-lim                 # CPU vocoder, no model download
 kicks serve --vocoder bigvgan             # Force one backend (default: each profile's own)
@@ -32,6 +37,62 @@ cd web && pnpm lint && pnpm build         # Lint + static export to web/out
 ```
 
 ## Architecture
+
+### Required workflow for training experiments
+
+Use the [combined fidelity and tracking plan](docs/high-fidelity-generation.md)
+as the single plan for audio improvements and their validation.
+
+**Before starting a training process:**
+
+1. Start or check `kicks dashboard` (`http://127.0.0.1:6060`) and review an
+   appropriate baseline. Compare absolute losses only with matching corpus,
+   split, preprocessing and objective. The dashboard flags known mismatches.
+2. Provide `--run-name`, `--intent`, `--hypothesis` and `--success-criteria`.
+   State the audible issue, the isolated change, and measurable acceptance
+   criteria covering high-frequency fidelity, listening and slider response.
+3. Use a separate candidate `--model-dir` for fine-tuning and record `--resume`.
+   A new run ID is generated automatically; do not overwrite another run's log.
+
+**During training:** inspect the baseline and epoch records, then revisit at
+meaningful intervals (for example every five epochs and before any decision).
+Watch validation, 2–16 kHz / 8–16 kHz / attack error, active dimensions, raw KL,
+beta and learning rate together. Add prose **Observations** with epoch numbers,
+measured changes, listening findings and report paths. Keep **Decision & next
+action** current when there is enough evidence. A numeric improvement does not
+authorize claiming better listening quality or promoting weights automatically.
+
+The notebook fields are `objective`, `hypothesis`, `success_criteria`,
+`observations` and `decision`. Use the HTML form, or read `GET /api/runs` and
+`GET /api/runs/<id>` and update selected prose fields with JSON at
+`POST /api/runs/<id>/notes`. Metrics belong to the training writer; never edit
+`run.json` to invent or improve a curve. Browser notes are stored separately so
+live telemetry cannot overwrite them.
+
+**After training:** record the decision and evidence from actual waveform
+evaluation, level-matched listening and control sweeps. The live HF KPIs measure
+decoded **log-mel before vocoding**; they are not waveform STFT errors, human
+ratings or a commercial-quality score. Train and validation curves also use
+different posterior/beta conventions. Preserve these distinctions in prose.
+
+The evidence has commands: `kicks fidelity --run <id>` renders the run's own
+held-out validation hits three ways (reference, real mel through the vocoder,
+VAE reconstruction through the vocoder), measures 2–8 / 8–16 kHz attack and body
+error, onset timing, envelope, flatness and late energy on level-matched audio,
+writes randomised blind A/B pairs (`listening/listening.html`) and attaches the
+summary to the run; `scripts/validate_controls.py --run <id>` attaches the
+slider audit. Both appear in the dashboard's **Evidence** card. `kicks promote`
+refuses without a written decision and both reports (`--allow-missing-evidence`
+to override, on the record), backs the served checkpoint up as `*_prev.pth`, and
+writes the new checkpoint's sha256 into the notebook. Stage 6 of the plan (a
+codec-latent sequence prior) is not implemented; it is contingent on stage 5.
+
+Logs default to `output/training/<run-id>/`, shared across instruments. Use
+`KICKS_RUNS_DIR` or `--runs-dir` for another root and point the dashboard at the
+same root. The standalone HTML can be opened directly with its sibling scripts;
+note editing and cross-run comparison use `kicks dashboard`. Existing Python
+processes cannot pick up new hooks retroactively: do not fabricate their
+missing metrics or interrupt an unrelated active run to attach the viewer.
 
 ### The central idea
 
@@ -126,11 +187,15 @@ Do not "tidy" those numbers.
 
 ### `kicks/nn/vae.py`
 
-2D conv VAE. `VAE(latent_dim=32, n_mels=128, n_frames=256)` — the spectrogram
-size is a constructor argument so a short-tail instrument can use fewer frames.
-`checkpoint_meta()` returns the shape metadata to save alongside the weights;
-`config.load_vae_from_checkpoint()` recovers it from older checkpoints by reading
-`fc_mu` and `fc_decode` shapes.
+2D conv VAE. `VAE(latent_dim=32, n_mels=128, n_frames=256, residual=False,
+latent_skips=False)` — the spectrogram size is a constructor argument so a
+short-tail instrument can use fewer frames. The two stage-3 options add
+zero-initialised residual blocks after every conv stage and FiLM injection of
+the latent at every decoder scale; both start as the identity, and with both off
+the `state_dict` keys are byte-identical to the shipped layout (a test pins
+this). `checkpoint_meta()` returns shape metadata plus an `architecture` block;
+`config.load_vae_from_checkpoint()` honours it, recovers shapes from `fc_mu` /
+`fc_decode` on older checkpoints, and treats a missing block as the defaults.
 
 ### `kicks/analysis/`
 
@@ -156,15 +221,42 @@ size is a constructor argument so a short-tail instrument can use fewer frames.
   `reference_from_rows`, `score_sample`, `frechet_distance`, `run_eval`. numpy/
   scipy only. The reference cache is fingerprinted on the instrument *and* the
   corpus contents.
+- **`fidelity.py`** — `kicks fidelity`. Metric functions (`compare_waveforms`,
+  `level_match`, `onset_ms`, `spectral_flatness`, `late_energy_db`, …) are
+  numpy/scipy only and windowed by the profile's `EvalWindows`; `run_fidelity`
+  imports torch lazily to render reference / vocoder-only / VAE triples, blind
+  pairs and prior samples, and attaches the summary to a run.
 - **`clustering.py`** — `run_cluster()`, the corpus analysis report.
 
 ### `kicks/training/`
 
 - **`loss.py`** — `vae_loss(...)`, multi-resolution reconstruction + beta·KL with
-  free bits, plus `transient_loss(recon, target, TransientLossSpec)`.
+  free bits, plus `transient_loss(recon, target, TransientLossSpec)`. Two
+  stage-2 terms are off by default so the shipped objective is unchanged:
+  `hf_detail_loss` (symmetric, weighted by the *reference's* activity within
+  60 dB of its peak over the whole hit — the transient term's tail penalty is
+  one-sided, so a dropped HF tail costs nothing there) and `attack_change_loss`
+  (frame-to-frame delta matching over `click_frames`). Pass `terms={}` to get
+  each unweighted component back; the trainer records them per epoch as
+  `train_term_*` / `val_term_*`.
 - **`trainer.py`** — the loop. Saves `vae_best.pth` (val loss) *and*
   `vae_best_eval.pth` (generative eval proxy: decode latents from the val
   posterior, measure descriptor realism). Both matter; they disagree.
+- **`tracking.py`** — automatically wraps each training invocation in a unique
+  run record, with atomic JSON/script snapshots and completed/failed/interrupted
+  states. A standard-library loopback server serves the packaged
+  `dashboard.html` and persists prose in separate notes files. The training
+  package imports lazily so viewing logs does not load torch or a model.
+  `attach_report(run_dir, kind, path, summary, note)` appends evidence to
+  `reports.json` (+ `reports.js` for the standalone page); `find_run` resolves
+  an ID prefix; `split_fingerprint` is what `kicks fidelity` uses to reproduce a
+  run's validation split.
+- **`promotion.py`** — `promote(profile, candidate, run_id, ...)`: the stage-5
+  copy with a paper trail (decision required, evidence required, `*_prev.pth`
+  backup, sidecar travels, sha256 into the notebook). Raises `PromotionRefused`.
+- **`metrics.py`** — cheap bin-weighted active-reference log-mel detail errors
+  (2–16 kHz, 8–16 kHz and the profile's attack window), measured during existing
+  validation. These add no vocoder inference or training-loss changes.
 
 ### `kicks/api/`
 
@@ -236,7 +328,9 @@ on Base UI (not Radix: composition is `render={<Link/>}`, not `asChild`).
 - **Spectrogram**: `(B, 1, 128, 256)`, values in [0, 1]
 - **VAE latent**: 32-dim µ by default (per-profile), logvar clamped to [-10, 10]
 - **Checkpoint**: `{"model": state_dict, "instrument": str, "latent_dim": int,
-  "n_mels": int, "n_frames": int, "epoch": int, "val_loss": float}`. A descriptor
+  "n_mels": int, "n_frames": int, "architecture": {"residual", "latent_skips",
+  "channels"}, "epoch": int, "val_loss": float, "training": {...weights, run_id}}`.
+  Older checkpoints lack `architecture` and mean the defaults. A descriptor
   control basis adds a `<checkpoint>.controls.npz` sidecar (fitted basis +
   calibrated slider ranges, fingerprinted on checkpoint + corpus); keep the two
   together when promoting or copying a model.
@@ -284,6 +378,9 @@ on Base UI (not Radix: composition is `render={<Link/>}`, not `asChild`).
 - `corpus/strip.py` backs up by default (`data/<corpus>_backup/`); `clean` moves
   rather than deletes, with a manifest.
 - Every `torch.load` uses `weights_only=True`.
+- `VAE()` with default options must keep the exact `state_dict` key layout of
+  the shipped checkpoints — add new modules behind flags, and keep the decoder
+  one `nn.Sequential` (latent injection points are indices into it).
 - `web/public/analysis/*.json` must never contain corpus filenames or paths.
 - Never put a Supabase service key or Stripe secret anywhere under `web/` —
   everything there is compiled into the public page.

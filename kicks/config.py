@@ -34,6 +34,8 @@ def load_vae_from_checkpoint(
     Shape metadata is written by :meth:`VAE.checkpoint_meta`, but older
     checkpoints predate it, so both are also recoverable from the weights: the
     latent size from ``fc_mu``, the frame count from the decoder's input width.
+    The ``architecture`` block (residual blocks, latent skips) is honoured when
+    present and defaults to the shipped layout when absent.
     """
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     state = checkpoint.get("model", checkpoint)
@@ -54,7 +56,14 @@ def load_vae_from_checkpoint(
             16 * flat // (256 * (n_mels // 16)) if flat else N_FRAMES
         )
 
-    model = VAE(latent_dim=latent_dim, n_mels=n_mels, n_frames=n_frames)
+    # Structural options arrived with the high-fidelity experiments; checkpoints
+    # written before them carry no ``architecture`` block and mean the defaults.
+    architecture = checkpoint.get("architecture") or {}
+    model = VAE(
+        latent_dim=latent_dim, n_mels=n_mels, n_frames=n_frames,
+        residual=bool(architecture.get("residual", False)),
+        latent_skips=bool(architecture.get("latent_skips", False)),
+    )
     model.load_state_dict(state)
     model.to(device)
     model.eval()

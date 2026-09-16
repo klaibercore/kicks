@@ -113,10 +113,125 @@ Two checkpoints are written, because the two things worth optimizing disagree:
 - `vae_best.pth` — lowest validation loss. Best reconstruction.
 - `vae_best_eval.pth` — best generative eval proxy: latents sampled from the
   validation posterior are decoded and their descriptors compared against the
-  corpus distribution. Tracks what a listener notices.
+  corpus distribution. Measures descriptor statistics, not listening quality.
 
 A model can reconstruct beautifully and still generate mush, so which one to
 serve is a real choice. Copy the one you want over `vae_best.pth`.
+
+### Training dashboard and experiment notebook
+
+Every new training invocation records a baseline, live progress and epoch KPIs.
+Start the local HTML viewer **before training**:
+
+```bash
+kicks dashboard                   # http://127.0.0.1:6060
+```
+
+In another terminal, describe the experiment as you start it:
+
+```bash
+kicks train --model-dir models/experiments/hf-baseline \
+  --run-name "HF detail baseline" \
+  --intent "Preserve the attack and natural high-frequency decay" \
+  --hypothesis "The baseline will identify where detail is lost" \
+  --success-criteria "Compare HF error, level-matched listening and slider response"
+```
+
+Use the [combined fidelity and tracking plan](docs/high-fidelity-generation.md)
+to sequence loss changes, residual/latent skip experiments, audio evaluation
+and checkpoint promotion. For fine-tuning, keep candidate weights in a separate
+`--model-dir` and record the source checkpoint with `--resume`.
+
+**Before training:** review a comparable run and fill in the objective,
+hypothesis and success criteria. These appear in the dashboard's notebook.
+**During training:** inspect validation and HF trends alongside latent activity,
+beta and learning rate. Update observations with epoch numbers and listening
+findings. **After training:** record the decision, supporting waveform/control
+reports and the next action. KPI improvement alone does not establish sellable
+audio quality.
+
+| Notebook field | Purpose |
+|---|---|
+| Objective (`--intent`) | The audible problem the run should solve |
+| Hypothesis (`--hypothesis`) | The change and expected reason for improvement |
+| Success criteria (`--success-criteria`) | Metrics, listening and control checks required for success |
+| Observations | Findings during training, including epochs and report paths |
+| Decision & next action | Continue, compare, reject or promote, with evidence |
+
+The viewer has interactive charts, optional smoothing, epoch ranges, two-run
+comparison, JSON export and editable notes. It records:
+
+- Train loss/reconstruction/KL; fixed-beta, posterior-mean validation loss and
+  its reconstruction/KL components.
+- Active-reference **log-mel** error in 2–16 kHz and 8–16 kHz, plus the
+  profile's HF attack window. These are **before the vocoder**. Active bins lie
+  within 60 dB of each reference's peak and above the mel silence floor.
+- Active latent dimensions, raw KL, actual learning rate, applied beta,
+  periodic descriptor-distribution proxy and epoch/elapsed time.
+- Configuration, data/split fingerprint, checkpoint path and lifecycle status.
+
+Training loss uses posterior samples and scheduled beta, so its absolute value
+is not directly comparable to the validation curve. Comparisons across runs
+also require matching data, split and loss settings; the viewer flags mismatches.
+Unavailable KPIs remain empty, including HF error for a silent reference.
+
+Records live in `output/training/<run-id>/`: `run.json`, `notes.json` and a
+standalone `index.html` with sibling data scripts. Open the HTML directly for
+a live read-only view, or use the server to edit notes and compare runs. The
+viewer needs no external services, CDN assets or model loading.
+`--runs-dir` / `KICKS_RUNS_DIR` override the shared records root;
+`kicks dashboard --port 6061` changes the viewer port. Records survive completed,
+failed and interrupted training. A hard-killed process may leave a running
+record; the viewer shows when updates have become stale.
+
+Tracking starts when the training loop begins, after corpus loading. Processes
+already running before this integration retain their previously imported code;
+their missing history is not reconstructed or invented. The tracking hooks
+apply when the next training process starts.
+
+### Loss and architecture experiments
+
+The shipped objective and network are the defaults. Each experiment is one flag
+away and is recorded in the run so the dashboard can tell matched runs apart:
+
+```bash
+# Stage 2 — loss only. Symmetric, reference-weighted HF detail over the whole
+# hit, and frame-to-frame change matching over the attack. Unweighted terms are
+# logged per epoch (Training dynamics ▸ "Val · HF detail term", …).
+kicks train --hf-detail-weight 0.5 --attack-change-weight 0.25 --model-dir models/experiments/loss   --run-name "Loss · HF detail 0.5 / attack 0.25" --intent ... --hypothesis ... --success-criteria ...
+
+# Stage 3 — architecture only. Residual blocks after every stage and the latent
+# injected (FiLM) at every decoder scale; both start as the identity. Recorded
+# in the checkpoint's `architecture` block and loaded back automatically.
+kicks train --residual --latent-skips --latent-dim 64 --model-dir models/experiments/arch ...
+```
+
+### Waveform evidence and promotion
+
+```bash
+kicks fidelity --run <run-id> --checkpoint models/experiments/loss/vae_best.pth
+```
+
+renders the run's own held-out validation hits three ways — the reference, the
+reference's real mel through the vocoder (the backend's ceiling), and the VAE's
+reconstruction through the vocoder — level-matches them, and reports 2–8 kHz and
+8–16 kHz attack/body error, onset timing, envelope error, spectral flatness and
+unwanted late energy, plus realism scores for fresh generations. It writes
+randomised blind A/B pairs (whole hit and 2 kHz+ band) with a small
+`listening/listening.html` tally page, and attaches the summary to the run's
+**Evidence** card. `scripts/validate_controls.py --run <run-id>` attaches the
+slider audit the same way.
+
+```bash
+kicks promote -i kick --run <run-id> --checkpoint models/experiments/loss/vae_best.pth   --decision "8–16 kHz body error −1.4 dB vs baseline, 2/16 blind rejections, controls pass 100%"
+```
+
+copies the candidate over the served checkpoint (previous kept as
+`vae_best_prev.pth`, calibration sidecar carried along), and refuses without a
+written decision and both a fidelity and a controls report on the run —
+`--allow-missing-evidence` overrides that and says so in the record. The
+checkpoint's sha256 lands in the notebook, so a served model always traces back
+to its experiment.
 
 ### 3. Synthesize
 
@@ -414,6 +529,7 @@ on the query string. CORS is a single origin by default, set via
 | `KICKS_DATA_DIR` | `data` | Corpus root |
 | `KICKS_MODEL_DIR` | `models` | Checkpoint root |
 | `KICKS_OUTPUT_DIR` | `output` | Output root |
+| `KICKS_RUNS_DIR` | `<KICKS_OUTPUT_DIR>/training` | Shared training records and notebooks |
 | `KICKS_VOCODER` | unset (each profile's own) | Force `discoder`, `bigvgan` or `griffinlim` for every instrument |
 | `KICKS_DISCODER_DIR` | `<KICKS_MODEL_DIR>/discoder` | Local DisCoder config and weights |
 | `KICKS_CONTROL` | `descriptor` | `descriptor` or `pca` |

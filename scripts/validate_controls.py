@@ -41,6 +41,8 @@ def main():
     parser.add_argument("--random", type=int, default=32)
     parser.add_argument("--corners", action="store_true")
     parser.add_argument("--refresh", action="store_true")
+    parser.add_argument("--run", help="Training run ID (or unique prefix) to attach the summary to as 'controls' evidence")
+    parser.add_argument("--runs-dir", help="Training records root (default: output/training or KICKS_RUNS_DIR)")
     args = parser.parse_args()
     torch.set_num_threads(4)
     args.out.mkdir(parents=True, exist_ok=True)
@@ -110,6 +112,15 @@ def main():
                "summary": summary, "results": rows}
     (args.out / "report.json").write_text(json.dumps(payload, indent=2))
     print(json.dumps(summary, indent=2),flush=True)
+    if args.run:
+        from kicks.training.tracking import attach_report, find_run, runs_root
+
+        run_dir = find_run(runs_root(args.runs_dir, profile.paths.output_root), args.run)
+        attach_report(run_dir, "controls", args.out / "report.json",
+                      {k: summary[k] for k in ("n", "mean_score", "min_score", "pass_rate",
+                                               "max_target_error", "p95_target_error", "median_seconds")},
+                      note=f"{args.vocoder} · {len(rows)} probes{' incl. corners' if args.corners else ''} · epoch {checkpoint.get('epoch')}")
+        print(f"Attached controls report to run {run_dir.name}", flush=True)
 
 
 if __name__ == "__main__":
