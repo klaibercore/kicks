@@ -1,386 +1,228 @@
-# CLAUDE.md
+# Repository instructions
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## Scope and source of truth
+
+- Project: profile-driven drum synthesis, VAE training, audio evaluation, a FastAPI backend, a static Next.js studio, and optional Supabase/Stripe accounts.
+- Human setup and product guide: `README.md`. Experiment sequence and research rationale: `docs/high-fidelity-generation.md`.
+- Read current code and `git diff` before changing behavior. Local corpora, checkpoints and active jobs can change independently of Git; inspect them before making claims about the current model.
+- Preserve unrelated work. Do not restart an existing training process to attach telemetry.
+- For files under `web/`, read `web/AGENTS.md` and `web/CLAUDE.md`; consult the installed Next.js docs they specify before editing application code.
+- Implemented: HF/attack loss experiments, residual/latent options, soft log-variance bound, beta schedule controls, tracking, fidelity/listening reports, control audits and promotion records.
+- Not implemented: the proposed codec-latent sequence prior and waveform-loss training through the vocoder. Do not describe them as shipped features.
 
 ## Commands
 
+Run Python commands from the repository root. Use `uv run` to select the project environment.
+
 ```bash
-uv sync                                   # Install dependencies
-
-kicks instruments                         # List profiles + which have a trained model
-kicks strip --dry-run                     # Preprocess corpus (preview)
-kicks strip                               # Isolate hits (backs up by default)
-kicks clean                               # Quarantine loops/outliers (dry run; --apply to move)
-kicks train                               # Train the VAE
-kicks train --hf-detail-weight 0.5 --attack-change-weight 0.25   # Stage-2 loss experiment
-kicks train --residual --latent-skips     # Stage-3 architecture experiment (new models only)
-kicks dashboard                           # Local training KPIs + notebook on :6060
-kicks fidelity --run <id>                 # Waveform fidelity report + blind A/B pairs, attached to a run
-kicks promote --run <id> -c <cand.pth>    # Adopt a candidate; needs a decision + attached evidence
-kicks serve                               # REST API on :8080 (the website in web/ is its client)
-kicks serve --griffin-lim                 # CPU vocoder, no model download
-kicks serve --vocoder bigvgan             # Force one backend (default: each profile's own)
-kicks serve --control descriptor          # Sliders target descriptors directly
-kicks generate -n 20 -k 8                 # GMM latent prior + best-of-k eval selection
-kicks eval                                # Score generated output against the corpus
-kicks sweep -n 40                         # Sweep the REST API slider space and score it
-kicks cluster                             # GMM + descriptor PCA report
-kicks publish-analysis                    # Cluster reports -> web/public/analysis/ (no filenames)
-
-# Every command takes --instrument / -i (kick | snare | hihat).
-kicks train -i snare -e 300
-
-docker compose up --build                 # API on :8080
-
-cd web && pnpm install && pnpm dev        # Website on :3000 (Next.js 16, shadcn/ui, static export)
-cd web && pnpm lint && pnpm build         # Lint + static export to web/out
+uv sync
+uv run kicks --help
+uv run kicks instruments
+uv run kicks dashboard                       # Loopback viewer :6060
+uv run kicks serve                           # API :8080
+uv run kicks serve --vocoder bigvgan          # Override all instrument defaults
+uv run kicks serve --griffin-lim              # No neural vocoder download; VAE still required
+uv run kicks strip -i kick --dry-run
+uv run kicks clean -i kick                    # Preview; --apply moves rejected files
+uv run kicks generate -i kick -n 20 -k 8
+uv run kicks eval -i kick
+uv run kicks sweep -i kick -n 40              # Requires the API
+uv run kicks cluster -i kick
+uv run kicks publish-analysis                # Writes public browser assets
+uv run pytest -q
 ```
 
-## Architecture
+Instrument-aware commands use `-i` / `--instrument`; commands such as `dashboard`, `instruments` and `publish-analysis` do not take that option. Script arguments differ: `scripts/validate_controls.py` uses `--instrument`, not `-i`.
 
-### Required workflow for training experiments
+Website, from `web/`: `pnpm install`, `pnpm dev` (:3000), `pnpm lint`, `pnpm build` (static export to `out/`). Use a static server for the production export; do not rely on `next start` for it.
 
-Use the [combined fidelity and tracking plan](docs/high-fidelity-generation.md)
-as the single plan for audio improvements and their validation.
+`docker compose up --build` serves the API with mounted data/models/output. The supplied Compose file reserves an NVIDIA GPU; adapt that reservation for other hosts.
 
-**Before starting a training process:**
+## Required training workflow
 
-1. Start or check `kicks dashboard` (`http://127.0.0.1:6060`) and review an
-   appropriate baseline. Compare absolute losses only with matching corpus,
-   split, preprocessing and objective. The dashboard flags known mismatches.
-2. Provide `--run-name`, `--intent`, `--hypothesis` and `--success-criteria`.
-   State the audible issue, the isolated change, and measurable acceptance
-   criteria covering high-frequency fidelity, listening and slider response.
-3. Use a separate candidate `--model-dir` for fine-tuning and record `--resume`.
-   A new run ID is generated automatically; do not overwrite another run's log.
+### Before training
 
-**During training:** inspect the baseline and epoch records, then revisit at
-meaningful intervals (for example every five epochs and before any decision).
-Watch validation, 2–16 kHz / 8–16 kHz / attack error, active dimensions, raw KL,
-beta and learning rate together. Add prose **Observations** with epoch numbers,
-measured changes, listening findings and report paths. Keep **Decision & next
-action** current when there is enough evidence. A numeric improvement does not
-authorize claiming better listening quality or promoting weights automatically.
+1. Check the active processes, available device, source checkpoint metadata and corpus. Use the existing dashboard or start `uv run kicks dashboard`.
+2. Review a comparable baseline. Fix the corpus, split seed, preprocessing, vocoder and evaluation settings; isolate the change under test.
+3. Supply `--run-name`, `--intent`, `--hypothesis`, `--success-criteria`. State the audible issue and measurable fidelity, listening and control criteria. Choose actual tolerances before the experiment.
+4. Set a separate `--model-dir` for candidate VAE weights. It is a root: a snare candidate adds `snare/`, a hi-hat candidate adds `hihat/`, a kick uses the root directly.
+5. For fine-tuning, pass `--resume` and record the source. It loads model weights with a fresh optimizer, not the old optimizer/scheduler state.
+6. Use `--preview 0` when collecting rendered evidence separately. Otherwise previews run after the tracked training loop and can load/download a vocoder.
 
-The notebook fields are `objective`, `hypothesis`, `success_criteria`,
-`observations` and `decision`. Use the HTML form, or read `GET /api/runs` and
-`GET /api/runs/<id>` and update selected prose fields with JSON at
-`POST /api/runs/<id>/notes`. Metrics belong to the training writer; never edit
-`run.json` to invent or improve a curve. Browser notes are stored separately so
-live telemetry cannot overwrite them.
+Example (settings are an experiment, not established winning values):
 
-**After training:** record the decision and evidence from actual waveform
-evaluation, level-matched listening and control sweeps. The live HF KPIs measure
-decoded **log-mel before vocoding**; they are not waveform STFT errors, human
-ratings or a commercial-quality score. Train and validation curves also use
-different posterior/beta conventions. Preserve these distinctions in prose.
-
-The evidence has commands: `kicks fidelity --run <id>` renders the run's own
-held-out validation hits three ways (reference, real mel through the vocoder,
-VAE reconstruction through the vocoder), measures 2–8 / 8–16 kHz attack and body
-error, onset timing, envelope, flatness and late energy on level-matched audio,
-writes randomised blind A/B pairs (`listening/listening.html`) and attaches the
-summary to the run; `scripts/validate_controls.py --run <id>` attaches the
-slider audit. Both appear in the dashboard's **Evidence** card. `kicks promote`
-refuses without a written decision and both reports (`--allow-missing-evidence`
-to override, on the record), backs the served checkpoint up as `*_prev.pth`, and
-writes the new checkpoint's sha256 into the notebook. Stage 6 of the plan (a
-codec-latent sequence prior) is not implemented; it is contingent on stage 5.
-
-Logs default to `output/training/<run-id>/`, shared across instruments. Use
-`KICKS_RUNS_DIR` or `--runs-dir` for another root and point the dashboard at the
-same root. The standalone HTML can be opened directly with its sibling scripts;
-note editing and cross-run comparison use `kicks dashboard`. Existing Python
-processes cannot pick up new hooks retroactively: do not fabricate their
-missing metrics or interrupt an unrelated active run to attach the viewer.
-
-### The central idea
-
-The pipeline is instrument-agnostic. Kicks, snares and hi-hats share one corpus
-loader, VAE, vocoder and evaluator. Everything that depends on *which drum* is
-being synthesised lives in an `InstrumentProfile` (`kicks/instruments/`).
-
-**When adding behaviour, ask whether it is instrument-dependent. If it is, it
-belongs in the profile, not in an `if instrument == ...` branch.** No module
-outside `kicks/instruments/` should name a drum type.
-
-Dependency direction is one-way: `instruments/` imports only
-`audio/constants`, and everything else imports `instruments/`.
-
-### Data flow
-
-```
-.wav → strip/clean → DrumDataset (LUFS → BigVGAN log-mel → fixed-norm [0,1])
-  → VAE train → latents (32-dim µ) → slider basis (PCA or descriptor)
-  → slider values → closed-loop solve → VAE decode → vocoder (per profile)
-  → waveform correction → .wav → eval
+```bash
+uv run kicks train -i kick \
+  --resume models/vae_best.pth \
+  --model-dir models/experiments/hf-detail \
+  --epochs 12 --learning-rate 0.00003 --beta 0.001 --preview 0 \
+  --hf-detail-weight 0.5 \
+  --run-name "Kick · HF detail ablation" \
+  --intent "Preserve audible high-frequency detail" \
+  --hypothesis "Symmetric reference-weighted HF loss reduces missing detail" \
+  --success-criteria "Compare HF errors, blind listening and control errors with a matched baseline"
 ```
 
-### `kicks/instruments/` — the profile system
+### CLI training defaults and experimental options
 
-- **`profile.py`** — the data types. `Region` (a rectangle of the spectrogram),
-  `DescriptorSpec` (a slider axis: `mean`, `log_ratio`, `fraction`,
-  `inverse_ratio`, or the gain-invariant `power_db_ratio` / `centroid_ms` the
-  calibrated profiles use — over one or two regions), `MetricSpec` (an eval
-  metric plus weight and verdict phrasing; `gate=True` means a hard penalty
-  rather than a weighted contribution, `multivariate=False` excludes it from the
-  Mahalanobis/Fréchet stats), `OnsetSpec`, `StripSpec`, `EvalWindows`,
-  `TransientLossSpec`, `PathSpec`, and `InstrumentProfile` tying them together.
-  `waveform_controls` opts a profile into the closed-loop waveform correction;
-  `envelope_gate` (default on) additionally vetoes slider targets whose decoded
-  low-end envelope re-peaks — turn it off for instruments whose envelope
-  legitimately does (hi-hat shimmer). `vocoder` names the mel-to-audio backend
-  the instrument renders best with (`discoder` default; the hi-hat says
-  `bigvgan`) — a measured choice, with the audit numbers in the profile comment.
-- **`metrics.py`** — `standard_metrics(noun, plural, drop=(), overrides={})`
-  builds the 12-metric set with the instrument's noun substituted in. Profiles
-  drop what does not apply and re-word what reads wrong.
-- **`kick.py` / `snare.py` / `hihat.py`** — one `PROFILE` constant each.
-- **`__init__.py`** — the registry. `get_profile(name)` resolves the argument,
-  then `KICKS_INSTRUMENT`, then the default; it also overlays `KICKS_DATA_DIR` /
-  `KICKS_MODEL_DIR` / `KICKS_OUTPUT_DIR` onto the profile's paths.
+| Option | Default | Contract |
+|---|---|---|
+| `--epochs` | `200` | Python `train()` has its own defaults; do not confuse them with CLI defaults |
+| `--latent-dim` | Profile value, currently `32` | Resumed checkpoints retain their stored shape |
+| `--batch-size` | `32` | Training and validation batch size |
+| `--learning-rate` | `1e-3` new / `1e-4` resume | Adam; cosine LR schedule spans `--epochs` |
+| `--beta` / `--free-bits` | `0.02` / `0.2` | Validation uses fixed target beta; free bits are per-dimension nats |
+| `--beta-cycles` | `4` | Cyclical beta annealing for a new model |
+| `--beta-anneal-epochs` | `--epochs` | Override beta's horizon for short screening runs; does not extend the LR horizon |
+| `--beta-floor` | `0.0` | Fraction of target beta, in `[0,1]`; e.g. `.1 × .02 = .002` minimum during annealing |
+| `--hf-detail-weight` | `0.0` | Symmetric reference-weighted HF loss over the hit |
+| `--attack-change-weight` | `0.0` | Frame-to-frame change matching over the profile's click window |
+| `--residual` | Off | Residual blocks in encoder and intermediate decoder stages |
+| `--latent-skips` | Off | Latent FiLM scale/shift at decoder feature scales |
+| `--soft-logvar` | Off | `10 * tanh(raw / 10)` instead of hard `[-10,10]` clipping; no added parameters |
+| `--seed` | `42` | Model initialization and deterministic split/shuffle setup |
+| `--preview` | `10` | Post-training sample previews; `0` skips |
 
-The **kick profile is the reference**: its descriptor windows, strip heuristics
-and metric weights are the ones the trained checkpoint was tuned against, and are
-byte-for-byte the pre-refactor behaviour. Its `PathSpec` uses `subdir=""` so it
-keeps the original flat layout (`models/vae_best.pth`, `output/eval_reference.json`).
-Do not "tidy" those numbers.
+- `--resume` rejects `--residual`, `--latent-skips` and `--soft-logvar`; these options are loaded from checkpoint architecture metadata. Fine-tuning uses fixed beta, ignoring the annealing horizon/floor.
+- Residual and FiLM additions initialize as identity operations. Equal full-network initialization requires matching shared weights; the same seed alone does not guarantee that across different module layouts.
+- A short screen with `--beta-anneal-epochs 200 --epochs 20` preserves the first 20 epochs of the beta schedule only. Record the different LR schedule when comparing runs.
+- `train --model-dir` pins `KICKS_DISCODER_DIR` and `KICKS_VOCODER_DIR` to the pre-override model root when unset, then changes `KICKS_MODEL_DIR` for candidate weights. Explicit vocoder-directory overrides win; avoid duplicate downloads per experiment.
 
-### `kicks/audio/`
+### During training
 
-- **`constants.py`** — `SAMPLE_RATE=44100`, `AUDIO_LENGTH=65536`, `N_FFT=1024`,
-  `HOP_LENGTH=256`, `N_MELS=128`, `N_FRAMES=256`, `LOG_MEL_MIN/MAX`,
-  `TARGET_LUFS`. Fixed across instruments so one vocoder and one architecture
-  serve all of them. Must stay in sync with BigVGAN's config.
-- **`waveform.py`** — **numpy/scipy only, no torch import.** `load_audio`,
-  `rms_envelope`, `bandpass`, `band_envelope`, `detect_onsets(x, OnsetSpec)`,
-  `is_loop`, `stft_power`, `band_power`, `apply_fade_out`. Keeping torch out of
-  here is why `kicks eval` and `kicks clean` start instantly — don't import torch
-  into this module or anything it pulls in.
-- **`io.py`** — torch-side loading. `load_waveform()` is the single definition of
-  "how audio enters the model" (mono → resample → fit length → LUFS); the
-  dataset and the latent prior both go through it.
-- **`mel.py`** — BigVGAN log-mel plus `normalize`/`denormalize`.
-- **`effects.py`** — envelope, drive, lowpass for the API's query params.
-- **`controls.py`** — `correct_waveform(waveform, targets, spans, profile)`:
-  bounded STFT gains (`profile.waveform_controls` masks) solved closed-loop
-  against the real vocoded waveform, applied before user effects to cancel
-  vocoder drift. Profiles opt in via `waveform_controls`.
-- **`vocoder.py`** — three backends: DisCoder (`load_discoder`, the pinned
-  official 44.1 kHz Z checkpoint, 1.72 GB, downloaded to `models/discoder/` on
-  first use, mmap-loaded), BigVGAN (`load_bigvgan`, plus fine-tuned weights from
-  the profile's `vocoder_dir`) and Griffin-Lim. `resolve_vocoder_type(profile,
-  requested)` is the one place precedence lives: explicit > `KICKS_VOCODER` >
-  `profile.vocoder`. `spec_to_audio(spec, vocoder, device)` honours a backend's
-  `inference_batch_size` (DisCoder renders one hit at a time — 430M params on an
-  8 GB Mac). All three share one post-chain: 25 Hz highpass, 20 kHz lowpass,
-  peak normalise, `gate_tail`.
+- Inspect epoch zero and revisit meaningful intervals, e.g. every five epochs or before a decision. Watch validation, HF/attack errors, raw KL, active dimensions, beta, LR and loss components together.
+- Update `observations` with epoch references, measured changes, listening findings and report paths. Record uncertainty and failed comparisons.
+- Never edit metrics to improve a curve. Never fabricate missing history or infer listening quality from a proxy.
+- Do not promote solely because a scalar improved. Keep the decision field current with evidence and outstanding checks.
 
-### `kicks/nn/`
+### After training: audio evidence
 
-- **`discoder.py`** — inference-only port of ETH DISCO's DisCoder (upstream
-  commit `8aee1ee`, MIT — `DISCODER_LICENSE` ships in the wheel). Encoder is
-  verified bit-exact against upstream on a reduced fixture; the DAC decoder comes
-  from the `descript-audio-codec` package. Pads odd frame counts to a training
-  segment and crops back.
-- **`vae.py`** — below.
+Evaluate the exact candidate with the intended instrument, corpus and vocoder. `--run` selects the split and report destination; it does **not** infer the candidate checkpoint, instrument or custom corpus path. Pass those explicitly when needed.
 
-### `kicks/nn/vae.py`
+```bash
+uv run kicks fidelity -i kick --run YOUR_RUN_ID \
+  --checkpoint models/experiments/hf-detail/vae_best.pth \
+  --out output/audits/hf-detail
+uv run python scripts/validate_controls.py --instrument kick --run YOUR_RUN_ID \
+  --checkpoint models/experiments/hf-detail/vae_best.pth \
+  --corners --random 32 --out output/audits/hf-detail-controls
+```
 
-2D conv VAE. `VAE(latent_dim=32, n_mels=128, n_frames=256, residual=False,
-latent_skips=False)` — the spectrogram size is a constructor argument so a
-short-tail instrument can use fewer frames. The two stage-3 options add
-zero-initialised residual blocks after every conv stage and FiLM injection of
-the latent at every decoder scale; both start as the identity, and with both off
-the `state_dict` keys are byte-identical to the shipped layout (a test pins
-this). `checkpoint_meta()` returns shape metadata plus an `architecture` block;
-`config.load_vae_from_checkpoint()` honours it, recovers shapes from `fc_mu` /
-`fc_decode` on older checkpoints, and treats a missing block as the defaults.
+- Fidelity renders reference / real-mel vocoder / VAE-vocoder triples; RMS-matches them with one shared anti-clip gain; measures HF, onset, envelope, flatness and late energy; also evaluates fresh prior generations.
+- Open the resulting `listening/listening.html`: randomized reference-vs-VAE pairs, whole hit and 2 kHz+ band. Its rejection tally is not persisted automatically. Copy findings and counts into the run notebook.
+- With `--run`, the saved seed/ratio and corpus fingerprint must reproduce the validation split. On mismatch or missing identity, the command warns and samples the whole corpus. Check `held_out`, `hit_origin`, `hits`; do not call a fallback held out.
+- Without `--run`, `--split-seed ORIGINAL_SEED --val-split ORIGINAL_RATIO` recreates a legacy split. This assumes the original corpus/order is unchanged; it has no historical fingerprint verification. `--seed` separately controls subset selection and A/B ordering. When a run is supplied, its split wins.
+- The split fingerprint includes seed, ratio, dataset length and ordered resolved paths/sizes/mtimes. It is not a byte-content hash and does not detect related samples or pack leakage. Preserve this limitation in reports.
+- Controls audit: `--checkpoint` and `--out` are required; `--corners` adds corner probes, `--random` controls random probes, `--run` attaches evidence. Dataset selection follows the instrument profile/environment.
 
-### `kicks/analysis/`
+### Promotion
 
-- **`descriptors.py`** — `compute_descriptors(spec, profile)` and friends. Pure
-  profile evaluation; accepts torch tensors or ndarrays of any leading shape.
-- **`latents.py`** — `extract_latents`, `select_n_clusters` (BIC), `fit_gmm`.
-- **`basis.py`** — `analyze_latent_space(latents, specs, profile, basis=...)`
-  returns a `SliderBasis`. `basis="pca"` names components by descriptor
-  correlation and computes cross-talk compensation for
-  `profile.decorrelated_descriptor`; `basis="descriptor"` fits a `DescriptorBasis`
-  with a closed-loop Newton `solve()`. `slider_positions_to_axis_values()` maps
-  [0,1] positions into basis space and applies the decorrelation.
-- **`calibration.py`** — `fit_or_load_basis(...)` persists the fitted descriptor
-  basis plus its calibrated slider ranges to `<checkpoint>.controls.npz`
-  (arrays + JSON only, loaded with `allow_pickle=False`), fingerprinted on the
-  checkpoint bytes, `CALIBRATION_VERSION`, profile and corpus. A restart reuses
-  it; a mismatch refits. Bump the version whenever the range search in
-  `basis._calibrate_ranges` changes. That search shrinks the slider box until
-  every *corpus-supported* probe (a real hit within 15% of the span) tracks its
-  target within 1%; probes the corpus never produces are recorded as
-  `max_unsupported_error` but are not binding.
-- **`evaluation.py`** — `analyze_hit(x, profile)`, `build_reference`,
-  `reference_from_rows`, `score_sample`, `frechet_distance`, `run_eval`. numpy/
-  scipy only. The reference cache is fingerprinted on the instrument *and* the
-  corpus contents.
-- **`fidelity.py`** — `kicks fidelity`. Metric functions (`compare_waveforms`,
-  `level_match`, `onset_ms`, `spectral_flatness`, `late_energy_db`, …) are
-  numpy/scipy only and windowed by the profile's `EvalWindows`; `run_fidelity`
-  imports torch lazily to render reference / vocoder-only / VAE triples, blind
-  pairs and prior samples, and attaches the summary to a run.
-- **`clustering.py`** — `run_cluster()`, the corpus analysis report.
+```bash
+uv run kicks promote -i kick --run YOUR_RUN_ID \
+  --checkpoint models/experiments/hf-detail/vae_best.pth
+```
 
-### `kicks/training/`
+- Write the decision in the notebook first, or pass `--decision`. Review listening and both reports against the predeclared criteria.
+- The current gate requires a decision, matching run/instrument metadata and attached `fidelity` + `controls` report kinds. It does **not** judge metric thresholds or bind all report/checkpoint/run identities. Verify the candidate path/hash and report provenance yourself.
+- `--allow-missing-evidence` bypasses only missing evidence and records the missing kinds. Use only within the user's requested scope and explain the absent evidence in the decision.
+- Promotion copies to `profile.paths.checkpoint`, saves the prior weights as `vae_best_prev.pth`, carries an available `<stem>.controls.npz`, and writes the new SHA-256 and paths to the run.
+- Check the destination root/environment and use a separate candidate path. Restart the serving process only when that operation is within the task's authorization; model instances remain cached until reloaded. Calibration detects stale sidecars and refits on first use.
 
-- **`loss.py`** — `vae_loss(...)`, multi-resolution reconstruction + beta·KL with
-  free bits, plus `transient_loss(recon, target, TransientLossSpec)`. Two
-  stage-2 terms are off by default so the shipped objective is unchanged:
-  `hf_detail_loss` (symmetric, weighted by the *reference's* activity within
-  60 dB of its peak over the whole hit — the transient term's tail penalty is
-  one-sided, so a dropped HF tail costs nothing there) and `attack_change_loss`
-  (frame-to-frame delta matching over `click_frames`). Pass `terms={}` to get
-  each unweighted component back; the trainer records them per epoch as
-  `train_term_*` / `val_term_*`.
-- **`trainer.py`** — the loop. Saves `vae_best.pth` (val loss) *and*
-  `vae_best_eval.pth` (generative eval proxy: decode latents from the val
-  posterior, measure descriptor realism). Both matter; they disagree.
-- **`tracking.py`** — automatically wraps each training invocation in a unique
-  run record, with atomic JSON/script snapshots and completed/failed/interrupted
-  states. A standard-library loopback server serves the packaged
-  `dashboard.html` and persists prose in separate notes files. The training
-  package imports lazily so viewing logs does not load torch or a model.
-  `attach_report(run_dir, kind, path, summary, note)` appends evidence to
-  `reports.json` (+ `reports.js` for the standalone page); `find_run` resolves
-  an ID prefix; `split_fingerprint` is what `kicks fidelity` uses to reproduce a
-  run's validation split.
-- **`promotion.py`** — `promote(profile, candidate, run_id, ...)`: the stage-5
-  copy with a paper trail (decision required, evidence required, `*_prev.pth`
-  backup, sidecar travels, sha256 into the notebook). Raises `PromotionRefused`.
-- **`metrics.py`** — cheap bin-weighted active-reference log-mel detail errors
-  (2–16 kHz, 8–16 kHz and the profile's attack window), measured during existing
-  validation. These add no vocoder inference or training-loss changes.
+## Tracking records and metric semantics
 
-### `kicks/api/`
+Default root: `<KICKS_OUTPUT_DIR>/training` (normally `output/training`). Override with `KICKS_RUNS_DIR` or `--runs-dir`; the writer and viewer must use the same root.
 
-- **`app.py`** — the FastAPI app. `/health`, `/instruments`, `/config`,
-  `/generate`, `/evaluate`, `/spectrogram`, `/me`, `POST /export`. Every
-  synthesis endpoint takes `instrument`. There is no HTML here — the website is
-  the only UI and lives in `web/`.
-- **`auth.py`** — optional Supabase auth. `Auth.current_user` / `require_user`
-  are FastAPI dependencies; `CreditsClient` calls the Postgres ledger functions
-  (`charge_export`, `refund_export`, `credit_balance`) through PostgREST as the
-  service role. Off unless `KICKS_SUPABASE_URL` is set, so local dev is open.
-- **`state.py`** — `ServerState` loads instruments lazily and keeps them, so one
-  server can serve several drums. Vocoders are cached per `(backend,
-  weights_dir)` and resolved per instrument (`vocoder_for(profile)`); `/health`
-  reports `vocoder: "profile"` plus a per-instrument `vocoders` map unless a
-  backend is forced, and `/config` reports the instrument's own.
-- **`middleware.py`** — token-bucket `RateLimiter`, `LRUCache`.
+| Artifact / API | Contract |
+|---|---|
+| `run.json`, `data.js` | Training writer owns metrics/config/history/lifecycle; atomic snapshots |
+| `notes.json`, `notes.js` | Prose is separate so telemetry cannot overwrite browser edits |
+| `reports.json`, `reports.js` | Attached evidence summaries, identities and local report paths |
+| `index.html` | Standalone live read-only view using sibling scripts |
+| `GET /api/runs` | List run summaries |
+| `GET /api/runs/<id>` | Full run, notebook and evidence |
+| `POST /api/runs/<id>/notes` | Partial JSON update of string-valued notebook fields |
 
-### `web/` — the website
+Notebook keys: `objective`, `hypothesis`, `success_criteria`, `observations`, `decision`. Initial CLI prose maps `--intent` to `objective`. `attach_report()` is the Python evidence API; `find_run()` accepts a full ID or unique prefix. The HTTP API uses full IDs.
 
-Next.js 16 App Router, `output: "export"` (GitHub Pages), Tailwind v4, shadcn/ui
-on Base UI (not Radix: composition is `render={<Link/>}`, not `asChild`).
+- Tracking wraps `training.train()` after corpus loading. It records baseline epoch `0`, live progress, completed epochs, and completed/failed/interrupted status. Hard kills may leave `running`; the viewer marks stale updates. Post-training CLI previews are outside this lifecycle.
+- Train loss: sampled posterior and scheduled beta. Validation: posterior mean and fixed target beta. Do not equate their absolute values.
+- `hf_mae_db`, `air_mae_db`, `attack_mae_db`: pre-vocoder log-mel errors; activity is within 60 dB of each reference peak and above the silence floor. Bands are 2–16 kHz, 8–16 kHz, and the profile's HF click window. Unmeasurable values are null.
+- `train_term_*` / `val_term_*`: unweighted loss components. Compare weighted totals only with matching weights/objective.
+- `active_dims`: per-dimension mean raw KL > 0.01 nats; `raw_kl` is unclamped to free bits. Activity does not establish fidelity.
+- `eval_proxy`: descriptor-distribution mismatch, lower is better; not a perceptual quality rating.
+- Fidelity waveform errors use a 512-point Hann STFT, hop 128, reference bins above −70 dBFS and profile attack/body windows. Keep them distinct from the live mel KPIs and corpus realism scores.
 
-- **`lib/api/`** — `KicksApi` client + the `Sound` type (instrument, slider
-  positions, effects). `soundQuery()` sorts keys so equal sounds hit the API cache.
-- **`hooks/use-studio.tsx`** — all studio state; `hooks/use-kit.tsx` — the pad
-  bank; `lib/midi.ts` — Web MIDI; `lib/audio/engine.ts` — one AudioContext,
-  decoded-buffer cache.
-- **`components/studio/`** discovers instruments and sliders from the API at
-  load time, so **adding an instrument needs no UI change.** The studio is
-  loaded client-only (`studio-loader.tsx`) — it needs AudioContext, MIDI and
-  localStorage.
-- **`components/analysis/`** renders `public/analysis/*.json` written by
-  `kicks publish-analysis`. Those files carry **no filenames or paths**; keep it
-  that way — the corpus is not public.
-- **`hooks/use-auth.tsx`**, **`lib/billing.ts`** — Supabase session, credits,
-  Stripe Checkout via Edge Functions. Everything degrades gracefully when
-  `NEXT_PUBLIC_SUPABASE_URL` is unset.
-- **`app/legal/*`** — German legal texts; operator details come from
-  `NEXT_PUBLIC_LEGAL_*` (see `lib/legal.ts`) and the pages warn until set.
-- The lint config is React-Compiler-strict (`react-hooks/set-state-in-effect`,
-  refs-in-render): keep effect bodies asynchronous and derive state instead of
-  resetting it in effects.
+## Architecture map
 
-### `supabase/`
+| Location | Responsibility / entry points |
+|---|---|
+| `instruments/` | `InstrumentProfile`, descriptors, metric weights, windows, onsets, strip rules, paths, waveform-control masks, vocoder; `get_profile`, registry |
+| `audio/constants.py` | Shared signal contract |
+| `audio/waveform.py` | NumPy/SciPy loading, envelopes, filters, onsets, STFT; torch-free |
+| `audio/io.py`, `data/dataset.py` | Shared waveform ingestion and `DrumDataset`; same preprocessing for dataset and prior |
+| `audio/mel.py`, `audio/vocoder.py` | Fixed mel normalization; DisCoder / BigVGAN / Griffin-Lim adapters |
+| `audio/controls.py`, `audio/effects.py` | Bounded STFT waveform correction, then user effects |
+| `nn/vae.py`, `config.py` | VAE options, device selection (CUDA > MPS > CPU), metadata-aware checkpoint loading |
+| `nn/discoder.py` | Inference port plus upstream `DISCODER_LICENSE`; fine-tuned DAC decoder from `descript-audio-codec` |
+| `analysis/descriptors.py`, `analysis/basis.py` | Descriptor measurements; PCA or closed-loop descriptor solve |
+| `analysis/calibration.py` | Fingerprinted descriptor basis and calibrated slider ranges |
+| `analysis/evaluation.py` | Corpus reference, waveform metrics, robust scores, set-level distance; torch-free |
+| `analysis/fidelity.py` | Matched waveform reports and blind pairs; metric helpers torch-free, rendering imports torch lazily |
+| `analysis/clustering.py`, `analysis/publish.py` | Corpus report, cluster audio, sanitized browser publication |
+| `training/loss.py`, `training/trainer.py` | Base/experimental objectives, baseline, schedules, checkpoint selection |
+| `training/tracking.py`, `training/dashboard.html` | Standard-library loopback server, lifecycle, notes, evidence and local charts |
+| `training/promotion.py` | Candidate copy and recorded decision; `PromotionRefused` |
+| `synthesis/generator.py` | Corpus-fitted GMM prior and best-of-k generation |
+| `corpus/` | Backed-up stripping; quarantine with a manifest |
+| `api/` | FastAPI routes, lazy instrument/backend caches, auth, credits, rate limiting |
+| `cli.py`, `sweep.py` | Lazy command implementations; API control-space sweep |
 
-- **`migrations/*_init.sql`** — schema, RLS on every table, the append-only
-  `credit_ledger`, Stripe catalogue mirror, orders, kits, consents, and the
-  `SECURITY DEFINER` functions the API and webhooks call. Orders are detached
-  (not deleted) on account erasure — § 147 AO retention.
-- **`functions/`** — Deno Edge Functions: `create-checkout-session`,
-  `stripe-webhook` (idempotent on event id via `stripe_events`), `billing-portal`,
-  `delete-account`.
+Paths in the table are relative to `kicks/`.
 
-### Other
+## Data contracts and invariants
 
-- **`cli.py`** — Typer. Every command takes `--instrument`; implementations are
-  imported lazily so `kicks eval` doesn't wait on torch.
-- **`analysis/publish.py`** — `kicks publish-analysis`: slims the cluster
-  reports for the browser and copies cluster audio into `web/public/analysis/`.
-- **`config.py`** — `get_device()` (CUDA > MPS > CPU) and
-  `load_vae_from_checkpoint()`. Paths live on profiles, not here.
-- **`corpus/strip.py`, `corpus/clean.py`** — corpus preparation.
-- **`synthesis/generator.py`** — GMM latent prior + best-of-k selection.
-- **`sweep.py`** — drives the running REST API and scores every result.
+1. Put instrument-specific DSP behavior in profiles, not scattered name branches. Profiles depend on `audio/constants`; the pipeline depends on profiles. The UI discovers instruments/sliders from the API. Do not hardcode five sliders.
+2. Preserve the kick's flat paths (`models/`, `output/`). Snare/hi-hat use subdirectories. Change descriptor windows, calibration ranges or metric weights only with measured justification and corresponding audits; do not preserve stale constants merely because they are old.
+3. Audio: 44,100 Hz, default 65,536 samples. Mel: FFT 1,024, hop 256, 128 bands, default 256 frames. Tensor `(B,1,128,256)` in `[0,1]`; fixed log bounds `[-11.5129,3.0]`. Keep dataset and vocoder configurations aligned; DisCoder validates compatibility.
+4. Default VAE: four stride-2 stages, channels `[32,64,128,256]`; latent dimension defaults to profile value. Shape dimensions must be divisible by 16. Preserve legacy `state_dict` keys with options off and the decoder's sequential indexing used by latent injections.
+5. Checkpoint metadata: `model`, `instrument`, `latent_dim`, `n_mels`, `n_frames`, `architecture` (`residual`, `latent_skips`, `soft_logvar`, `channels`), epoch/loss and `training`. Older files can omit metadata; `load_vae_from_checkpoint()` infers shapes and defaults missing architecture options to off. It returns `(model, metadata)`.
+6. Use `weights_only=True` when loading checkpoints. Calibration NPZs contain arrays/JSON and use `allow_pickle=False`.
+7. Outputs: `vae_best.pth` = lowest validation; `vae_best_eval.pth` = lowest periodic descriptor proxy; `vae_checkpoint.pth` = final state; `loss_curves.png` = static curves. Fine-tunes evaluate/save the source baseline before optimizer steps.
+8. `multi_resolution_loss` pools a single mel at scales 1/2/4; it is not a multi-window waveform STFT objective. The dedicated transient tail term penalizes excess HF only; the general reconstruction still penalizes missing energy. Optional symmetric HF loss addresses that gap without replacing the tail penalty.
+9. Calibration sidecar: replace the checkpoint suffix with `.controls.npz` (`vae_best.pth` → `vae_best.controls.npz`). Fingerprint covers checkpoint bytes, profile, corpus and `CALIBRATION_VERSION`. Bump the version when range-search semantics change. It calibrates the decoded spectrogram; waveform correction handles backend drift.
+10. Independence is descriptor tracking within calibrated ranges, not guaranteed perceptual independence. Corpus-supported probes govern range calibration; unsupported errors remain reported. Test final audio with axes, corners and random combinations.
+11. Keep `audio/waveform.py`, `analysis/evaluation.py`, fidelity metric imports and the standalone tracking viewer free of eager torch/model imports. Root and training package exports are lazy.
+12. Eval references invalidate on instrument/corpus fingerprint (`--refresh-ref` forces rebuild). Corpus preparation must keep backups/quarantine manifests.
 
-## Key data contracts
+## Vocoder and path configuration
 
-- **Spectrogram**: `(B, 1, 128, 256)`, values in [0, 1]
-- **VAE latent**: 32-dim µ by default (per-profile), logvar clamped to [-10, 10]
-- **Checkpoint**: `{"model": state_dict, "instrument": str, "latent_dim": int,
-  "n_mels": int, "n_frames": int, "architecture": {"residual", "latent_skips",
-  "channels"}, "epoch": int, "val_loss": float, "training": {...weights, run_id}}`.
-  Older checkpoints lack `architecture` and mean the defaults. A descriptor
-  control basis adds a `<checkpoint>.controls.npz` sidecar (fitted basis +
-  calibrated slider ranges, fingerprinted on checkpoint + corpus); keep the two
-  together when promoting or copying a model.
-- **Slider count** follows `profile.n_sliders` (one per descriptor) — never
-  assume 5
-- **Slider query params**: `s1..sN`, legacy `pc1..pcN`, or the slider's own
-  lowercased label. Under the PCA basis a slider's label is *discovered at fit
-  time*, so map names through `SliderBasis.names`, not `profile.descriptor_keys`
-- **Rate limiter**: 10 req/s token bucket, shared
-- **LRU cache**: 100 entries keyed on the query string
-- **Export idempotency**: `POST /export` takes `Idempotency-Key: <uuid>`; the
-  ledger has a unique index on it, so a retry returns the same charge
-- **Static-export routes** end in `/` (`trailingSlash: true`); link to `/studio/`,
-  not `/studio`
-- **Vocoder selection**: per profile (`profile.vocoder`: kick and snare
-  `discoder`, hi-hat `bigvgan`). `KICKS_VOCODER=…` / `--vocoder …` /
-  `--griffin-lim` force one backend for every instrument. The calibration
-  sidecars are vocoder-independent (decoded-spectrogram scope); the waveform
-  correction closes the loop on whichever backend rendered
-- **Control basis**: `KICKS_CONTROL=descriptor|pca` or `--control ...`, default
-  `descriptor` (closed-loop descriptor solve; PCA remains available as fallback)
+- Resolution: explicit backend request > `KICKS_VOCODER` > `profile.vocoder`. Current profile defaults: kick/snare `discoder`, hi-hat `bigvgan`.
+- DisCoder: pinned revision `6505384d8fd5f18338f171dd81dc10c9a0d34fe9`, config + ~1.72 GB model, mmap load; serial per-hit inference limits activation memory. `KICKS_DISCODER_DIR` overrides its directory.
+- BigVGAN: local fine-tuned weights from `PathSpec.vocoder_dir`. `KICKS_VOCODER_DIR` overrides it; normally the profile's model directory plus `vocoder/`. `train --model-dir` pins the shared directory before changing the candidate root.
+- Preserve `patch_bigvgan_from_pretrained` compatibility with newer `huggingface_hub`. Griffin-Lim uses a mel-filterbank pseudo-inverse, not `InverseMelScale`.
+- Backends share highpass/lowpass, peak normalization and tail gating. Benchmark the actual generation/control path; reconstruction-only vocoder rankings do not establish generation quality.
+- Root overrides: `KICKS_DATA_DIR`, `KICKS_MODEL_DIR`, `KICKS_OUTPUT_DIR`. Default instrument: `KICKS_INSTRUMENT` (fallback kick). Controls: `KICKS_CONTROL=descriptor|pca` (default descriptor).
 
-## Important gotchas
+## API, web and hosted services
 
-- BigVGAN's `n_fft` is **1024**, not 2048 — must match across constants, dataset
-  and vocoder. `load_bigvgan` still picks up any `*.pth` in the profile's
-  `vocoder_dir` (`models/vocoder/checkpoint_100.pth` is the tuned kick vocoder).
-  DisCoder shares the exact same mel (`validate_discoder_config` refuses a
-  checkpoint that does not), which is why no VAE was retrained for it.
-- DisCoder is a generic music vocoder: it inverts *real* drum mels worse than
-  BigVGAN (kick 3.7 vs 2.3 dB, hi-hat 4.2 vs 1.9 dB active-mel error) yet
-  tracks the VAE's blurred, out-of-distribution mels better on pitched drums.
-  Judge a vocoder on `scripts/validate_controls.py` (the generation path), not
-  on `scripts/compare_vocoders.py` alone. Don't switch the hi-hat to DisCoder
-  without re-running that audit.
-- `BigVGAN.from_pretrained` is patched (`patch_bigvgan_from_pretrained`) for
-  huggingface_hub >= 1.0. Idempotent.
-- Griffin-Lim uses the mel filterbank pseudo-inverse, not `InverseMelScale`
-  (unsupported on MPS, rank-unstable on CPU).
-- Normalisation bounds are **fixed** (`[-11.5129, 3.0]`), not dataset-dependent.
-- `kicks/audio/waveform.py` and `kicks/analysis/evaluation.py` must stay
-  torch-free.
-- The eval reference cache invalidates on instrument *and* corpus fingerprint;
-  `--refresh-ref` forces a rebuild.
-- `corpus/strip.py` backs up by default (`data/<corpus>_backup/`); `clean` moves
-  rather than deletes, with a manifest.
-- Every `torch.load` uses `weights_only=True`.
-- `VAE()` with default options must keep the exact `state_dict` key layout of
-  the shipped checkpoints — add new modules behind flags, and keep the decoder
-  one `nn.Sequential` (latent injection points are indices into it).
-- `web/public/analysis/*.json` must never contain corpus filenames or paths.
-- Never put a Supabase service key or Stripe secret anywhere under `web/` —
-  everything there is compiled into the public page.
+- `ServerState` loads instruments lazily. Vocoders cache by `(backend, weights_dir)`; `/health` reports profile mode and a backend map unless forced. Serving instances do not hot-reload promoted checkpoints.
+- Routes: `/health`, `/instruments`, `/config`, `/generate`, `/evaluate`, `/spectrogram`, `/me`, `POST /export`. Synthesis requests select `instrument`; `/spectrogram` is pre-vocoder, `/evaluate` scores rendered/effected audio.
+- Sliders accept `s1..sN`, legacy `pc1..pcN`, or exposed names. With PCA, map names through `SliderBasis.names`; labels are discovered during fitting. Effects: `attack_ms`, `decay_ms`, `drive`, `filter`.
+- Shared token bucket: 10 requests/second; LRU: 100 entries, keyed by query. `web/lib/api/` sorts sound query keys for consistent caching.
+- Auth defaults off without `KICKS_SUPABASE_URL`, required with it; `KICKS_AUTH_MODE` supports required/optional/off. `/me` and `/export` require a user. Export charges one credit; `Idempotency-Key` deduplicates ledger charging.
+- Supabase tokens verify locally via JWKS or optional legacy `KICKS_SUPABASE_JWT_SECRET`. `KICKS_SUPABASE_SERVICE_KEY` is server-only. CORS comes from comma-separated `KICKS_CORS_ORIGINS` (default localhost:3000).
+- `web/`: Next.js 16 / React 19, static export, Tailwind 4, shadcn on Base UI. Use Base UI `render={<Link/>}` composition, not Radix `asChild`. Routes use trailing `/`. Studio is client-only for AudioContext/MIDI/localStorage. Respect the React Compiler lint rules.
+- `.github/workflows/pages.yml` is currently manual (`workflow_dispatch`). Public build variables configure API, Supabase anon access, analytics and legal-page operator details. API hosting is separate.
+- Never put service-role or Stripe secrets under `web/`; `NEXT_PUBLIC_*` ships to browsers. Preserve row-level security, service-only credit writes, append-only ledger and idempotent Stripe webhook handling in `supabase/`.
+- Public `web/public/analysis/*.json` must not expose corpus filenames/paths. Full local fidelity reports include them; do not publish those as public analytics.
+- `scripts/fetch_drum_abuse.py [kick|snare|hihat|all]` downloads/deduplicates into `data/_staging/<plural>/abuse/`. Staging is not automatic corpus integration.
+
+## Validation by change type
+
+- Documentation: verify options against current `--help`, local links/anchors, artifact names and Markdown/SVG rendering. No training or full app build is needed just to edit prose.
+- Loss/model/schedules/fidelity/promotion: `uv run pytest -q tests/test_high_fidelity.py`; add/run checks covering the changed behavior.
+- Tracking/dashboard: `uv run pytest -q tests/test_training_tracking.py`; inspect desktop/mobile charts, live updates, note preservation and standalone HTML when UI behavior changes.
+- Controls/calibration/vocoders: relevant `tests/test_audio_controls.py` / `tests/test_discoder.py`; use matched waveform/control audits when claiming audio improvement.
+- API/auth/publication: `tests/test_api_auth.py`, `tests/test_publish.py`; full Python regression command is `uv run pytest -q`.
+- Website: from `web/`, `pnpm lint` then `pnpm build`; inspect affected views. Publishing generated analysis is a separate write step, not part of ordinary lint/build checks.
+- Report what was actually measured. Automated checks, proxy scores and listening evidence are separate claims.
