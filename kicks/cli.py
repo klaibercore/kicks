@@ -71,7 +71,7 @@ def train(
     preview: int = typer.Option(10, "--preview", help="Reconstructions and samples to render after training (0 = skip)"),
     resume: str = typer.Option(None, "--resume", help="Fine-tune this checkpoint with a fresh optimizer"),
     learning_rate: float = typer.Option(None, "--learning-rate", help="Defaults to 1e-4 for fine-tuning, 1e-3 for a new model"),
-    model_dir: str = typer.Option(None, "--model-dir", help="Output model root (use a separate directory for candidate weights)"),
+    model_dir: str = typer.Option(None, "--model-dir", help="Root for this run's VAE weights (candidate models); shared vocoder weights stay in the default root"),
     seed: int = typer.Option(42, "--seed", help="Reproducible training and validation split"),
     run_name: str = typer.Option(None, "--run-name", help="Name shown in the training dashboard"),
     intent: str = typer.Option("", "--intent", help="Audible problem this experiment should solve"),
@@ -97,6 +97,12 @@ def train(
     from kicks.training import train as train_loop
 
     if model_dir:
+        # Candidate VAE weights get their own root. The shared vocoder weights
+        # (DisCoder's 1.7 GB download, the tuned BigVGAN) stay in the default
+        # root, or a run into a fresh --model-dir re-downloads DisCoder.
+        shared_root = os.environ.get("KICKS_MODEL_DIR", "models")
+        os.environ.setdefault("KICKS_DISCODER_DIR", os.path.join(shared_root, "discoder"))
+        os.environ.setdefault("KICKS_VOCODER_DIR", os.path.join(shared_root, "vocoder"))
         os.environ["KICKS_MODEL_DIR"] = model_dir
     if epochs < 1 or batch_size < 1:
         raise typer.BadParameter("epochs and batch size must be positive")

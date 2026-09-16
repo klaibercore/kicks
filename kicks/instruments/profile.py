@@ -329,7 +329,13 @@ class PathSpec:
 
     @property
     def vocoder_dir(self) -> str:
-        return self._model("vocoder")
+        """Fine-tuned BigVGAN weights. Shared across candidate model roots.
+
+        ``KICKS_VOCODER_DIR`` wins; otherwise ``<model_root>/vocoder``. The
+        ``train --model-dir`` flag pins this to the default root so a
+        candidate's own directory never has to hold a copy of the vocoder.
+        """
+        return os.environ.get("KICKS_VOCODER_DIR") or self._model("vocoder")
 
     @property
     def eval_reference(self) -> str:
