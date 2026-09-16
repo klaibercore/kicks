@@ -104,7 +104,8 @@ def test_default_architecture_keeps_the_shipped_state_dict_layout():
     assert len(keys) == 57
     assert keys[0] == "encoder.0.weight" and keys[-1] == "decoder.9.bias"
     assert not any("film" in k or "body" in k for k in keys)
-    assert VAE(32).architecture == {"residual": False, "latent_skips": False, "channels": [32, 64, 128, 256]}
+    assert VAE(32).architecture == {"residual": False, "latent_skips": False, "soft_logvar": False,
+                                    "channels": [32, 64, 128, 256]}
 
 
 def _copy_shared_weights(plain: VAE, option: VAE):
@@ -279,3 +280,39 @@ def test_promotion_needs_a_decision_and_evidence_then_copies_and_records(tmp_pat
     assert record["reports"][-1]["kind"] == "promotion"
     assert record["reports"][-1]["summary"]["checkpoint_sha256"] == summary["checkpoint_sha256"]
     assert "Promoted" in record["notes"]["decision"] and record["notes"]["decision"].startswith("Promote: HF")
+
+
+# ---------------------------------------------------------------------------
+# KL-escape recipe switches: soft logvar bound and beta floor
+# ---------------------------------------------------------------------------
+
+def test_soft_logvar_matches_the_clamp_near_zero_and_keeps_a_gradient_at_the_rail():
+    from kicks.training.trainer import _cyclical_beta
+    raw = torch.tensor([-30.0, -10.0, -1.0, 0.0, 1.5, 40.0], requires_grad=True)
+    soft = 10 * torch.tanh(raw / 10)
+    assert torch.allclose(soft[2:5], raw[2:5], atol=0.02)          # agrees where healthy models live
+    assert soft.min() > -10 and soft.max() < 10                      # same range as the clamp
+    soft.sum().backward()
+    assert raw.grad[0] > 0 and raw.grad[-1] > 0                      # never zero, unlike clamp
+    hard, soft_model = VAE(32), VAE(32, soft_logvar=True)
+    assert list(hard.state_dict()) == list(soft_model.state_dict())  # no parameters added
+    soft_model.load_state_dict(hard.state_dict())
+    x = torch.rand(2, 1, 128, 256)
+    with torch.no_grad():
+        _, lv_hard = hard.eval().encode(x)
+        _, lv_soft = soft_model.eval().encode(x)
+    assert torch.allclose(lv_hard, lv_soft, atol=0.05)
+    assert soft_model.architecture["soft_logvar"] is True
+    assert _cyclical_beta(0, 0.02, 200, 4) == 0.0
+    assert _cyclical_beta(0, 0.02, 200, 4, floor=0.1) == pytest.approx(0.002)
+    assert _cyclical_beta(30, 0.02, 200, 4, floor=0.1) == pytest.approx(0.02)   # floor never lowers beta
+    assert _cyclical_beta(7, 0.02, 0, 4, floor=0.1) == 0.02                       # resume: fixed beta
+
+
+def test_soft_logvar_round_trips_through_checkpoints(tmp_path):
+    model = VAE(32, soft_logvar=True)
+    torch.save({"model": model.state_dict(), **model.checkpoint_meta()}, tmp_path / "soft.pth")
+    loaded, meta = load_vae_from_checkpoint(str(tmp_path / "soft.pth"), torch.device("cpu"))
+    assert loaded.soft_logvar and meta["architecture"]["soft_logvar"] is True
+    plain, _ = load_vae_from_checkpoint(str(tmp_path / "soft.pth"), torch.device("cpu"))
+    assert plain.soft_logvar  # the flag lives in the file, not the loader's defaults

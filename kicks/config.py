@@ -63,6 +63,7 @@ def load_vae_from_checkpoint(
         latent_dim=latent_dim, n_mels=n_mels, n_frames=n_frames,
         residual=bool(architecture.get("residual", False)),
         latent_skips=bool(architecture.get("latent_skips", False)),
+        soft_logvar=bool(architecture.get("soft_logvar", False)),
     )
     model.load_state_dict(state)
     model.to(device)

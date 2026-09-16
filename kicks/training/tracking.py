@@ -196,7 +196,7 @@ def track_training(function):
         dataset = p["dloader"].dataset
         config = {key: p[key] for key in ("epochs", "beta", "free_bits", "beta_anneal_epochs",
                                          "beta_cycles", "val_split", "eval_every", "seed", "source_checkpoint",
-                                         "hf_detail_weight", "attack_change_weight")}
+                                         "hf_detail_weight", "attack_change_weight", "beta_floor")}
         config.update(
             instrument=profile.name, device=str(p["device"] or next(model.parameters()).device),
             latent_dim=model.latent_dim, n_mels=model.n_mels, n_frames=model.n_frames,

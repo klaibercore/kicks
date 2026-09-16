@@ -80,14 +80,20 @@ def _eval_proxy_score(
     return float(np.mean(standardized.mean(0) ** 2 + (standardized.std(0) - 1) ** 2))
 
 
-def _cyclical_beta(epoch: int, beta: float, anneal_epochs: int, cycles: int) -> float:
+def _cyclical_beta(epoch: int, beta: float, anneal_epochs: int, cycles: int,
+                   floor: float = 0.0) -> float:
     """Beta ramps 0 -> beta over the first half of each cycle, then holds.
 
     Repeated ramps let the model re-learn structure the KL term flattened on the
-    previous cycle, which is what keeps latent dimensions alive.
+    previous cycle, which is what keeps latent dimensions alive. ``floor`` (a
+    fraction of ``beta``) keeps the KL pull from ever switching off: the snare's
+    KL plateau forms in the near-zero-beta phase, when the encoder is free to
+    scale |µ| up for a higher-SNR code and never comes back.
     """
     if anneal_epochs <= 0 or epoch >= anneal_epochs:
         return beta
+    if floor > 0:
+        return max(floor * beta, _cyclical_beta(epoch, beta, anneal_epochs, cycles))
     cycle_len = anneal_epochs / max(1, cycles)
     return beta * min(1.0, ((epoch % cycle_len) / cycle_len) * 2)
 
@@ -112,6 +118,7 @@ def train(
     source_checkpoint: str | None = None,
     hf_detail_weight: float = 0.0,
     attack_change_weight: float = 0.0,
+    beta_floor: float = 0.0,
     *,
     run_name: str | None = None,
     intent: str = "",
@@ -166,6 +173,7 @@ def train(
                                  "source_checkpoint": source_checkpoint,
                                  "hf_detail_weight": hf_detail_weight,
                                  "attack_change_weight": attack_change_weight,
+                                 "beta_floor": beta_floor,
                                  "run_id": tracker.id,
                                  "preprocessing": "peak_safe_lufs_v1",
                                  "validation": "posterior_mean_fixed_beta_v1"},
@@ -210,7 +218,7 @@ def train(
     baseline, _, _, baseline_metrics = _validate()
     tracker.epoch({"epoch": 0, "val_loss": baseline, **baseline_metrics,
                    "learning_rate": optimizer.param_groups[0]["lr"],
-                   "beta": _cyclical_beta(0, beta, beta_anneal_epochs, beta_cycles),
+                   "beta": _cyclical_beta(0, beta, beta_anneal_epochs, beta_cycles, beta_floor),
                    "elapsed_seconds": time.monotonic() - tracker.started})
     if source_checkpoint is not None:
         best_val_loss = baseline
@@ -232,7 +240,7 @@ def train(
 
         for epoch in range(epochs):
             epoch_start = time.monotonic()
-            current_beta = _cyclical_beta(epoch, beta, beta_anneal_epochs, beta_cycles)
+            current_beta = _cyclical_beta(epoch, beta, beta_anneal_epochs, beta_cycles, beta_floor)
             learning_rate = optimizer.param_groups[0]["lr"]
             tracker.progress(phase="training", epoch=epoch + 1, batch=0,
                              batches=len(train_loader), force=True)

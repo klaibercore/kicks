@@ -65,6 +65,9 @@ def train(
     attack_change_weight: float = typer.Option(0.0, "--attack-change-weight", min=0.0, help="Frame-to-frame attack change matching loss (stage-2 experiment; 0 = off)"),
     residual: bool = typer.Option(False, "--residual", help="Residual block after every conv stage (stage-3 experiment; new models only)"),
     latent_skips: bool = typer.Option(False, "--latent-skips", help="Inject the latent at every decoder scale (stage-3 experiment; new models only)"),
+    soft_logvar: bool = typer.Option(False, "--soft-logvar", help="Bound logvar with 10·tanh(x/10) instead of a hard clamp, so the KL keeps a gradient at the rail (new models only)"),
+    beta_floor: float = typer.Option(0.0, "--beta-floor", min=0.0, max=1.0, help="Minimum beta during annealing, as a fraction of --beta (0 = ramps from zero)"),
+    beta_anneal_epochs: int = typer.Option(None, "--beta-anneal-epochs", min=1, help="Epochs the beta cycles span (default: --epochs). Set to the full run length when screening a recipe with fewer epochs"),
     preview: int = typer.Option(10, "--preview", help="Reconstructions and samples to render after training (0 = skip)"),
     resume: str = typer.Option(None, "--resume", help="Fine-tune this checkpoint with a fresh optimizer"),
     learning_rate: float = typer.Option(None, "--learning-rate", help="Defaults to 1e-4 for fine-tuning, 1e-3 for a new model"),
@@ -104,12 +107,13 @@ def train(
     os.makedirs(profile.paths.model_dir or ".", exist_ok=True)
     os.makedirs(profile.paths.output_dir or ".", exist_ok=True)
 
-    if resume and (residual or latent_skips):
-        raise typer.BadParameter("--residual/--latent-skips describe a new model; a resumed checkpoint keeps its own architecture")
+    if resume and (residual or latent_skips or soft_logvar):
+        raise typer.BadParameter("--residual/--latent-skips/--soft-logvar describe a new model; a resumed checkpoint keeps its own architecture")
 
     device = get_device()
     model = (load_vae_from_checkpoint(resume, device)[0] if resume
-             else VAE(latent_dim=latent_dim, residual=residual, latent_skips=latent_skips).to(device))
+             else VAE(latent_dim=latent_dim, residual=residual, latent_skips=latent_skips,
+                      soft_logvar=soft_logvar).to(device))
     dataset = DrumDataset(data, profile, n_frames=model.n_frames)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     lr = learning_rate if learning_rate is not None else (1e-4 if resume else 1e-3)
@@ -120,16 +124,17 @@ def train(
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model: {n_params:,} parameters, latent_dim={model.latent_dim}, device={device}, "
-          f"residual={model.residual}, latent_skips={model.latent_skips}")
+          f"residual={model.residual}, latent_skips={model.latent_skips}, soft_logvar={model.soft_logvar}")
 
     train_loop(
         model, dataloader, optimizer, profile,
         epochs=epochs, device=device,
         beta=beta, free_bits=free_bits,
-        beta_anneal_epochs=0 if resume else epochs, beta_cycles=beta_cycles,
+        beta_anneal_epochs=0 if resume else (beta_anneal_epochs or epochs), beta_cycles=beta_cycles,
         scheduler=scheduler, transient_weight=transient_weight,
         seed=seed, source_checkpoint=resume,
         hf_detail_weight=hf_detail_weight, attack_change_weight=attack_change_weight,
+        beta_floor=beta_floor,
         run_name=run_name, intent=intent, hypothesis=hypothesis,
         success_criteria=success_criteria, runs_dir=runs_dir,
     )

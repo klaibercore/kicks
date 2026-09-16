@@ -21,6 +21,14 @@ the shipped one, so existing checkpoints load unchanged:
 
 Both start as the identity, so a run with a flag on begins from the same
 function as one with it off and any difference is learned, not initialised.
+
+``soft_logvar`` replaces the hard ``clamp(logvar, -10, 10)`` with
+``10 * tanh(raw / 10)``: same range, but the gradient never vanishes at the
+rail. The snare recipe pins logvar at -10 with |µ| ≈ 26 (KL ≈ 350 nats/dim for
+all 200 epochs); through a hard clamp the KL term has no gradient to pull it
+back. The two bounds agree to within 1 % for |raw| < 2, so it is not an
+architecture change at initialisation either. It adds no parameters.
+
 The chosen options are written into checkpoints as ``architecture`` and read
 back by ``config.load_vae_from_checkpoint``.
 """
@@ -100,6 +108,7 @@ class VAE(nn.Module):
         n_frames: int = N_FRAMES,
         residual: bool = False,
         latent_skips: bool = False,
+        soft_logvar: bool = False,
     ) -> None:
         super().__init__()
         if n_mels % _DOWNSAMPLE or n_frames % _DOWNSAMPLE:
@@ -111,6 +120,7 @@ class VAE(nn.Module):
         self.n_frames = n_frames
         self.residual = residual
         self.latent_skips = latent_skips
+        self.soft_logvar = soft_logvar
         self._bottleneck = (_CHANNELS[-1], n_mels // _DOWNSAMPLE, n_frames // _DOWNSAMPLE)
 
         encoder: list[nn.Module] = []
@@ -161,12 +171,15 @@ class VAE(nn.Module):
         return {
             "residual": self.residual,
             "latent_skips": self.latent_skips,
+            "soft_logvar": self.soft_logvar,
             "channels": list(_CHANNELS),
         }
 
     def encode(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         h = self.encoder(x).flatten(1)
-        return self.fc_mu(h), torch.clamp(self.fc_logvar(h), min=-10, max=10)
+        raw = self.fc_logvar(h)
+        logvar = 10 * torch.tanh(raw / 10) if self.soft_logvar else torch.clamp(raw, min=-10, max=10)
+        return self.fc_mu(h), logvar
 
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         std = torch.exp(0.5 * logvar)
