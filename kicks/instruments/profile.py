@@ -395,6 +395,9 @@ class InstrumentProfile:
     decorrelated_descriptor: str | None = "decay"
     description: str = ""
     waveform_controls: bool = False
+    #: Anchor the studio's texture to a corpus encoding; controls move only in
+    #: its local descriptor-sensitive subspace with bounded spectral correction.
+    identity_controls: bool = False
     #: Gate slider targets on a monotonically-decaying low-end envelope
     #: (catches a delayed second body peak). Only valid when the instrument's
     #: envelope genuinely decays monotonically — a hi-hat's shimmer legitimately

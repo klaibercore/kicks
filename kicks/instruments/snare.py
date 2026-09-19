@@ -133,4 +133,5 @@ PROFILE = InstrumentProfile(
     fundamental_band=(120.0, 400.0),
     latent_dim=32,
     waveform_controls=True,
+    identity_controls=True,
 )

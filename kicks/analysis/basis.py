@@ -36,11 +36,12 @@ class SliderBasis:
     basis: "PCA | DescriptorBasis"   # anything with inverse_transform()
     projected: np.ndarray            # (n_samples, n_sliders) corpus positions
     names: list[str]                 # slider labels, e.g. ["Sub", "Punch", ...]
-    mins: list[float]                # 2nd percentile per axis
-    maxs: list[float]                # 98th percentile per axis
+    mins: list[float]                # lower target per axis
+    maxs: list[float]                # upper target per axis
     decorrelate_idx: int | None = None        # axis that absorbs cross-talk
     decorrelate_ratios: np.ndarray | None = None   # per-axis compensation ratios
     calibration: dict | None = None
+    control_points: np.ndarray | None = None  # monotonic percentile knots, rows span [0, 1]
 
     @property
     def n_sliders(self) -> int:
@@ -434,9 +435,8 @@ def slider_positions_to_axis_values(
 ) -> list[float]:
     """Map slider positions in [0, 1] to basis-space values, with decorrelation.
 
-    Each position is scaled into its axis's 2nd-98th percentile range; the
-    decorrelated axis is then nudged to cancel the drift the other sliders
-    introduced by moving away from their midpoints.
+    Identity controls interpolate corpus percentile knots, so the centre is
+    the median. Legacy bases use linear ranges and optional PCA decorrelation.
     """
     if len(positions) != basis.n_sliders:
         raise ValueError(
@@ -446,7 +446,12 @@ def slider_positions_to_axis_values(
     values = []
     for i, raw in enumerate(positions):
         lo, hi = basis.mins[i], basis.maxs[i]
-        values.append(max(lo, min(hi, lo + raw * (hi - lo))))
+        if not np.isfinite(raw):
+            raise ValueError("slider positions must be finite")
+        if basis.control_points is not None:
+            values.append(float(np.interp(raw, np.linspace(0, 1, len(basis.control_points)), basis.control_points[:, i])))
+        else:
+            values.append(max(lo, min(hi, lo + raw * (hi - lo))))
 
     if basis.decorrelate_ratios is not None and basis.decorrelate_idx is not None:
         di = basis.decorrelate_idx

@@ -167,6 +167,7 @@ PROFILE = InstrumentProfile(
     fundamental_band=None,   # unpitched
     latent_dim=32,
     waveform_controls=True,
+    identity_controls=True,
     # Shimmer legitimately re-peaks the envelope every ~100-300 ms; a
     # monotonic-decay gate would veto real hats.
     envelope_gate=False,

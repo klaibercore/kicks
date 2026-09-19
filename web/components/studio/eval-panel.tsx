@@ -19,8 +19,8 @@ export function EvalPanel() {
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-medium">Realism check</h3>
-          <p className="text-xs text-muted-foreground">Scores the rendered audio against the training corpus.</p>
+          <h3 className="text-sm font-medium">Corpus comparison</h3>
+          <p className="text-xs text-muted-foreground">Compares acoustic measurements. Use your ears to judge the sound.</p>
         </div>
         <Button size="sm" variant="outline" onClick={() => void evaluate()} disabled={!sound || evaluating}>
           {evaluating ? "Scoring…" : "Evaluate"}
@@ -51,6 +51,13 @@ export function EvalPanel() {
               </li>
             ))}
           </ul>
+          {evaluation.control_fit?.limited ? (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              {evaluation.control_fit.includes_effects
+                ? "Shaping effects are included in these measurements and can move the sound beyond its slider targets."
+                : "Some controls have reached this texture’s range. Try another variation for a different response."}
+            </p>
+          ) : null}
           <dl className="grid grid-cols-2 gap-x-4 gap-y-1 border-t border-border pt-3 font-mono text-xs sm:grid-cols-3">
             {Object.entries(evaluation.descriptors).map(([k, v]) => (
               <div key={k} className="flex justify-between">

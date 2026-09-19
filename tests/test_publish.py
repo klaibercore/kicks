@@ -68,3 +68,22 @@ def test_publish_writes_index_and_skips_missing(tmp_path, monkeypatch):
     assert names == ["snare"]  # kick and hihat have no report here and are skipped
     assert (web / "snare.json").exists()
     assert json.loads((web / "index.json").read_text())["instruments"][0]["n_samples"] == 2
+
+
+def test_clustering_evidence_and_projected_coordinates_are_published():
+    report = _report(get_profile("kick"))
+    report["schema_version"] = 2
+    report["generated_at"] = "2026-09-16T12:00:00+00:00"
+    report["clustering"] = {"selected_k": 2, "silhouette": 0.1234567,
+                            "candidates": [{"k": 2, "covariance": "full", "bic": 123.456789, "converged": True}]}
+    report["latent_projection"] = {"method": "pca", "variance_explained": [.6, .2, .1]}
+    report["cluster_details"] = {"0": {"representative_idx": 0, "mean_confidence": .9, "ambiguous_count": 0}}
+    report["samples"][0].update(latent1=1.12345678, latent2=-2.0, latent3=0.0, entropy=.12345678)
+    published = publish_report(report)
+    assert published["clustering"]["silhouette"] == .1235
+    assert published["clustering"]["candidates"][0]["bic"] == 123.4568
+    assert published["latent_projection"] == report["latent_projection"]
+    assert published["samples"][0]["latent1"] == 1.1235
+    assert published["samples"][0]["entropy"] == .1235
+    assert published["cluster_details"]["0"]["representative_idx"] == 0
+    assert "Vendor Pack" not in json.dumps(published)

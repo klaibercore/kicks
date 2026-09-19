@@ -1,6 +1,6 @@
 "use client";
 
-import { DownloadIcon, PlayIcon, RotateCcwIcon, ShuffleIcon } from "lucide-react";
+import { DicesIcon, DownloadIcon, PlayIcon, RotateCcwIcon, ShuffleIcon } from "lucide-react";
 import Link from "next/link";
 import { useEffect } from "react";
 import { Button } from "@/components/ui/button";
@@ -11,7 +11,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { useStudio } from "@/hooks/use-studio";
 
 export function Transport() {
-  const { sound, rendering, preview, autoAudition, setAutoAudition, reset, randomize, commit, exporting, exportSample, health } =
+  const { sound, config, rendering, preview, autoAudition, setAutoAudition, reset, randomize, newVariation, commit, exporting, exportSample, health } =
     useStudio();
   const { enabled: authEnabled, user, credits } = useAuth();
 
@@ -36,11 +36,19 @@ export function Transport() {
       <Button onClick={() => void preview(true)} disabled={!sound || rendering} className="min-w-28">
         <PlayIcon data-icon="inline-start" /> {rendering ? "Rendering…" : "Preview"}
       </Button>
+      {config?.variation && (
+        <Tooltip>
+          <TooltipTrigger render={<Button variant="outline" disabled={!sound || rendering} onClick={() => { newVariation(); commit(); }} />}>
+            <DicesIcon data-icon="inline-start" /> New variation
+          </TooltipTrigger>
+          <TooltipContent>A different drum texture with the same slider settings</TooltipContent>
+        </Tooltip>
+      )}
       <Tooltip>
         <TooltipTrigger render={<Button variant="outline" size="icon" aria-label="Randomise sliders" onClick={() => { randomize(); commit(); }} />}>
           <ShuffleIcon />
         </TooltipTrigger>
-        <TooltipContent>Randomise</TooltipContent>
+        <TooltipContent>Randomise sliders; keep this texture</TooltipContent>
       </Tooltip>
       <Tooltip>
         <TooltipTrigger render={<Button variant="outline" size="icon" aria-label="Reset sliders" onClick={() => { reset(); commit(); }} />}>

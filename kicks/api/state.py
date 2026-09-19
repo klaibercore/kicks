@@ -15,7 +15,6 @@ from dataclasses import dataclass
 import torch
 
 from ..analysis.basis import SliderBasis
-from ..analysis.calibration import fit_or_load_basis
 from ..analysis.descriptors import DecoderResponse
 from ..analysis.evaluation import Reference, build_reference
 from ..config import get_device, load_vae_from_checkpoint
@@ -23,6 +22,7 @@ from ..data import DrumDataset
 from ..instruments import DEFAULT_INSTRUMENT, InstrumentProfile, get_profile
 from ..nn import VAE
 from ..audio.vocoder import load_vocoder, resolve_vocoder_type
+from ..synthesis.controlled import fit_control_basis
 
 
 @dataclass
@@ -125,7 +125,7 @@ class ServerState:
         model, _ = load_vae_from_checkpoint(profile.paths.checkpoint, self.device)
         dataset = DrumDataset(data_dir, profile, n_frames=model.n_frames)
         print(f"Fitting the {self.control_basis} slider basis...")
-        basis = fit_or_load_basis(
+        basis = fit_control_basis(
             model, dataset, profile, self.device, mode=self.control_basis,
         )
         for i, name_ in enumerate(basis.names):

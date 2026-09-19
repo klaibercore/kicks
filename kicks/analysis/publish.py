@@ -43,6 +43,9 @@ def _slim_sample(row: dict[str, Any], pc_keys: list[str], precision: int) -> dic
     slim["descriptors"] = row["descriptors"]
     for pc in pc_keys:
         slim[pc] = row[pc]
+    for key in ("latent1", "latent2", "latent3", "entropy"):
+        if key in row:
+            slim[key] = row[key]
     probs = row.get("probs") or []
     slim["confidence"] = max(probs) if probs else 1.0
     return _round(slim, precision)
@@ -58,6 +61,7 @@ def publish_report(report: dict[str, Any], precision: int = PRECISION) -> dict[s
             "pca_variance_explained", "pca_source", "n_clusters", "corpus",
             "pc_names", "pca_loadings", "pc_descriptor_correlations",
             "descriptor_correlations", "cluster_profiles", "descriptor_stats",
+            "schema_version", "generated_at", "clustering", "latent_projection", "cluster_details",
         )
         if k in report
     }
@@ -67,6 +71,10 @@ def publish_report(report: dict[str, Any], precision: int = PRECISION) -> dict[s
     published["samples"] = [_slim_sample(s, pc_keys, precision) for s in report["samples"]]
     published["descriptor_docs"] = {
         d.key: d.doc for d in get_profile(report["instrument"]).descriptors
+    }
+    published["descriptor_units"] = {
+        d.key: {"power_db_ratio": "dB", "centroid_ms": "ms"}.get(d.kind, "")
+        for d in get_profile(report["instrument"]).descriptors
     }
     return _round(published, precision)
 

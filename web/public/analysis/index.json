@@ -5,7 +5,7 @@
       "display_name": "Kick",
       "description": "Bass drum one-shots \u2014 sub-dominant, short beater click, long decay.",
       "n_samples": 10109,
-      "n_clusters": 10,
+      "n_clusters": 15,
       "descriptors": [
         "sub",
         "punch",
@@ -14,14 +14,14 @@
         "decay"
       ],
       "report": "kick.json",
-      "cluster_audio": 10
+      "cluster_audio": 15
     },
     {
       "name": "snare",
       "display_name": "Snare",
       "description": "Snare one-shots \u2014 shell tone plus wire rattle, medium decay.",
       "n_samples": 7994,
-      "n_clusters": 10,
+      "n_clusters": 16,
       "descriptors": [
         "body",
         "crack",
@@ -30,14 +30,14 @@
         "decay"
       ],
       "report": "snare.json",
-      "cluster_audio": 10
+      "cluster_audio": 16
     },
     {
       "name": "hihat",
       "display_name": "Hi-Hat",
       "description": "Hi-hat one-shots \u2014 unpitched, top-end dominant, very short decay.",
       "n_samples": 5824,
-      "n_clusters": 10,
+      "n_clusters": 16,
       "descriptors": [
         "attack",
         "body",
@@ -46,7 +46,7 @@
         "decay"
       ],
       "report": "hihat.json",
-      "cluster_audio": 10
+      "cluster_audio": 16
     }
   ]
 }

@@ -6,6 +6,7 @@ Calibration probes and validation probes use different random seeds.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import itertools
 import json
 import sys
@@ -19,16 +20,15 @@ import soundfile as sf
 import torch
 
 from kicks.analysis.basis import slider_positions_to_axis_values
-from kicks.analysis.calibration import fit_or_load_basis
 from kicks.analysis.descriptors import DecoderResponse, descriptor_vector
 from kicks.analysis.evaluation import analyze_hit, build_reference, score_sample
 from kicks.audio.constants import SAMPLE_RATE
-from kicks.audio.controls import correct_waveform
 from kicks.audio.mel import spectrogram
-from kicks.audio.vocoder import load_vocoder, resolve_vocoder_type, spec_to_audio
+from kicks.audio.vocoder import load_vocoder, resolve_vocoder_type
 from kicks.config import get_device, load_vae_from_checkpoint
 from kicks.data import DrumDataset
 from kicks.instruments import get_profile
+from kicks.synthesis.controlled import fit_control_basis, render_controls
 
 
 def main():
@@ -41,6 +41,9 @@ def main():
     parser.add_argument("--random", type=int, default=32)
     parser.add_argument("--corners", action="store_true")
     parser.add_argument("--refresh", action="store_true")
+    parser.add_argument("--control", choices=("descriptor", "legacy", "identity"), default="descriptor")
+    parser.add_argument("--texture-seeds", type=int, nargs="*", default=[],
+                        help="Additional centre probes with reproducible texture seeds")
     parser.add_argument("--run", help="Training run ID (or unique prefix) to attach the summary to as 'controls' evidence")
     parser.add_argument("--runs-dir", help="Training records root (default: output/training or KICKS_RUNS_DIR)")
     args = parser.parse_args()
@@ -50,7 +53,8 @@ def main():
     device = get_device()
     model, checkpoint = load_vae_from_checkpoint(args.checkpoint, device)
     dataset = DrumDataset(profile=profile, n_frames=model.n_frames)
-    basis = fit_or_load_basis(model, dataset, profile, device, checkpoint=args.checkpoint, refresh=args.refresh)
+    basis = fit_control_basis(model, dataset, profile, device, mode=args.control,
+                              checkpoint=args.checkpoint, refresh=args.refresh)
     response = DecoderResponse(model, profile)
     span = np.array(basis.maxs) - basis.mins
     dims = len(span)
@@ -62,6 +66,7 @@ def main():
     if args.corners:
         points.extend((f"corner_{i}", np.array(p)) for i, p in enumerate(itertools.product((0, 1), repeat=dims)))
     points.extend((f"random_{i}", p) for i, p in enumerate(np.random.default_rng(20260915).uniform(size=(args.random, dims))))
+    points.extend((f"texture_{seed}", np.full(dims, .5)) for seed in args.texture_seeds)
     args.vocoder = resolve_vocoder_type(profile, args.vocoder)
     vocoder = load_vocoder(device, args.vocoder, weights_dir=profile.paths.vocoder_dir)
     reference = build_reference(profile.paths.data_dir, profile)
@@ -69,12 +74,8 @@ def main():
     for label, position in points:
         start = time.monotonic()
         target = np.array(slider_positions_to_axis_values(position, basis))
-        z = basis.basis.solve(target, response)
-        with torch.no_grad():
-            spec = model.decode(torch.tensor(z, dtype=torch.float32, device=device))
-        audio = spec_to_audio(spec, vocoder, device)
-        if profile.waveform_controls:
-            audio = correct_waveform(audio[0], target, span, profile)[None]
+        seed = int(label.removeprefix("texture_")) if label.startswith("texture_") else 0
+        spec, audio = render_controls(model, basis, profile, response, vocoder, device, position, seed=seed)
         waveform = audio[0].numpy()
         measured = descriptor_vector(spec, profile)
         # This second measurement catches vocoder-induced coupling; descriptor
@@ -82,7 +83,7 @@ def main():
         audible = descriptor_vector(spectrogram(audio, n_frames=model.n_frames), profile)
         metrics = analyze_hit(waveform, profile)
         scored = score_sample(label, metrics, reference, profile) if metrics else None
-        row = {"label": label, "positions": position.tolist(), "target": target.tolist(),
+        row = {"label": label, "seed": seed, "positions": position.tolist(), "target": target.tolist(),
                "descriptors": measured.tolist(), "waveform_descriptors": audible.tolist(),
                "target_error": ((audible-target)/span).tolist(),
                "decoder_target_error": ((measured-target)/span).tolist(),
@@ -102,11 +103,14 @@ def main():
             measured.append(np.ptp([r[kind] for r in axis_rows],axis=0)/span)
         crosstalk[kind] = np.array(measured).tolist()
     summary = {"n": len(rows), "mean_score": float(scores.mean()), "min_score": float(scores.min()),
+               "multiple_onsets": sum(r["metrics"] is not None and r["metrics"]["n_onsets"] > 1 for r in rows),
                "pass_rate": float((scores>=70).mean()), "max_target_error": float(np.abs(matrix).max()),
                "p95_target_error": float(np.percentile(np.abs(matrix),95)),
                "axis_response": crosstalk,
                "median_seconds": float(np.median([r["seconds"] for r in rows]))}
-    payload = {"checkpoint": args.checkpoint, "vocoder": args.vocoder, "epoch": checkpoint.get("epoch"),
+    payload = {"checkpoint": args.checkpoint,
+               "checkpoint_sha256": hashlib.sha256(Path(args.checkpoint).read_bytes()).hexdigest(),
+               "control": args.control, "vocoder": args.vocoder, "epoch": checkpoint.get("epoch"),
                "val_loss": checkpoint.get("val_loss"), "descriptor_keys": profile.descriptor_keys,
                "mins": basis.mins, "maxs": basis.maxs, "calibration": basis.calibration,
                "summary": summary, "results": rows}

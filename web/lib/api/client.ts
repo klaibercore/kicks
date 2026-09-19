@@ -24,6 +24,7 @@ export type TokenProvider = () => Promise<string | null>;
 export function soundQuery(sound: Sound): string {
   const params = new URLSearchParams();
   params.set("instrument", sound.instrument);
+  if (sound.seed) params.set("seed", String(sound.seed));
   for (const key of Object.keys(sound.sliders).sort()) {
     params.set(key, sound.sliders[key].toFixed(3));
   }

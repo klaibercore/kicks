@@ -78,13 +78,13 @@ function StudioBody() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Studio</h1>
           <p className="text-sm text-muted-foreground">
-            Five perceptual axes per drum. Move a slider, hear the result, put it on a pad.
+            Shape a drum’s character, audition it, and build your kit.
           </p>
         </div>
         {studio.health ? (
           <div className="flex flex-wrap gap-1.5 font-mono text-[11px]">
             <Badge variant="outline">{studio.config?.vocoder ?? studio.health.vocoder}</Badge>
-            <Badge variant="outline">{studio.health.control} basis</Badge>
+            <Badge variant="outline">{studio.config?.variation ? "Corpus texture" : `${studio.health.control} basis`}</Badge>
             <Badge variant="outline">{studio.health.device}</Badge>
           </div>
         ) : null}
@@ -124,6 +124,11 @@ function StudioBody() {
           </CardHeader>
           <CardContent className="flex flex-col gap-6">
             {studio.config ? <SliderRack /> : <SliderSkeleton />}
+            {studio.config?.variation ? (
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                Explore textures with New variation, then shape the tone and decay. Each variation is saved with your pads.
+              </p>
+            ) : null}
             <div>
               <h3 className="mb-3 text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Shaping</h3>
               <EffectsRack />

@@ -22,6 +22,10 @@ export interface SampleRow {
   pc1: number;
   pc2: number;
   pc3?: number;
+  latent1?: number;
+  latent2?: number;
+  latent3?: number;
+  entropy?: number;
 }
 
 export interface PcName {
@@ -38,10 +42,13 @@ export interface DescriptorStat {
 }
 
 export interface Report {
+  schema_version?: number;
+  generated_at?: string;
   instrument: string;
   descriptor_keys: string[];
   descriptor_labels: string[];
   descriptor_docs: Record<string, string>;
+  descriptor_units?: Record<string, string>;
   pca_variance_explained: number[];
   pca_source: string;
   n_clusters: number;
@@ -53,4 +60,37 @@ export interface Report {
   descriptor_correlations: Record<string, Record<string, number>>;
   cluster_profiles: Record<string, { count: number } & Record<string, number>>;
   descriptor_stats: Record<string, DescriptorStat>;
+  cluster_details?: Record<
+    string,
+    {
+      mean_confidence: number;
+      ambiguous_count: number;
+      representative_idx: number;
+    }
+  >;
+  latent_projection?: { method: string; variance_explained: number[] };
+  clustering?: {
+    method: string;
+    dimensions: number;
+    retained_variance: number;
+    covariance: string;
+    selected_k: number;
+    max_k: number;
+    at_search_boundary: boolean;
+    bic: number;
+    bic_gap: number | null;
+    candidates: {
+      k: number;
+      covariance: string;
+      bic: number;
+      converged: boolean;
+    }[];
+    silhouette: number | null;
+    silhouette_samples: number;
+    mean_confidence: number;
+    ambiguous_count: number;
+    confidence_threshold: number;
+    mean_entropy: number;
+    seed: number;
+  };
 }

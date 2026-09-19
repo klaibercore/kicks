@@ -1,37 +1,132 @@
 "use client";
 
-import { Bar, BarChart, XAxis, YAxis } from "recharts";
-import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
-import { descriptorValues, histogram } from "@/lib/analysis/stats";
+import { Bar, BarChart, ReferenceLine, XAxis, YAxis } from "recharts";
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from "@/components/ui/chart";
+import {
+  descriptorUnit,
+  descriptorValues,
+  histogram,
+} from "@/lib/analysis/stats";
 import type { Report } from "@/lib/analysis/types";
 
-const chartConfig = { count: { label: "Samples", color: "var(--chart-1)" } } satisfies ChartConfig;
+const chartConfig = {
+  count: { label: "Corpus", color: "var(--chart-1)" },
+  selected: { label: "Selected cluster", color: "var(--chart-1)" },
+} satisfies ChartConfig;
 
-/** Small multiples: one histogram per descriptor, shared axes, single hue. */
-export function Distributions({ report }: { report: Report }) {
+export function Distributions({
+  report,
+  isolated,
+}: {
+  report: Report;
+  isolated: number | null;
+}) {
   return (
     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
       {report.descriptor_keys.map((key, i) => {
-        const bins = histogram(descriptorValues(report, key), 24);
         const stat = report.descriptor_stats[key];
-        const data = bins.map((b) => ({ x: ((b.x0 + b.x1) / 2).toFixed(2), count: b.count }));
+        const min = stat.min;
+        const max = stat.max > min ? stat.max : min + 1;
+        const bins = histogram(descriptorValues(report, key), 28, min, max);
+        const subset = histogram(
+          report.samples
+            .filter((s) => s.cluster === isolated)
+            .map((s) => s.descriptors[key]),
+          28,
+          min,
+          max,
+        );
+        const data = bins.map((b, j) => ({
+          x: (b.x0 + b.x1) / 2,
+          count: b.count - (isolated === null ? 0 : subset[j].count),
+          selected: subset[j].count,
+        }));
+        const unit = descriptorUnit(key, report);
         return (
-          <figure key={key} className="rounded-lg border border-border p-3">
-            <figcaption className="mb-1 flex items-baseline justify-between">
-              <span className="text-sm font-medium">{report.descriptor_labels[i]}</span>
-              <span className="tabular font-mono text-xs text-muted-foreground">
-                μ {stat.mean.toFixed(2)} · σ {stat.std.toFixed(2)}
+          <figure
+            key={key}
+            className="rounded-xl border border-border bg-card p-5"
+          >
+            <figcaption className="mb-4 flex items-baseline justify-between gap-2">
+              <span className="text-sm font-medium">
+                {report.descriptor_labels[i]}
+              </span>
+              <span className="font-mono text-[10px] text-muted-foreground">
+                mean {stat.mean.toFixed(1)} {unit}
               </span>
             </figcaption>
-            <ChartContainer config={chartConfig} className="h-28 w-full">
-              <BarChart data={data} margin={{ left: 0, right: 0, top: 4, bottom: 0 }} barCategoryGap={1}>
-                <XAxis dataKey="x" tickLine={false} axisLine={false} fontSize={10} interval={5} />
+            <ChartContainer
+              config={{
+                ...chartConfig,
+                count: {
+                  ...chartConfig.count,
+                  label: isolated === null ? "Corpus" : "Other samples",
+                },
+              }}
+              className="h-32 w-full"
+            >
+              <BarChart
+                data={data}
+                barCategoryGap={1}
+                margin={{ left: 0, right: 8, top: 4, bottom: 0 }}
+              >
+                <XAxis
+                  dataKey="x"
+                  type="number"
+                  domain={[min, max]}
+                  tickCount={4}
+                  tickFormatter={(v: number) => `${v.toFixed(0)}`}
+                  tickLine={false}
+                  axisLine={false}
+                  fontSize={10}
+                />
                 <YAxis hide />
-                <ChartTooltip content={<ChartTooltipContent labelFormatter={(l) => `≈ ${l}`} />} cursor={{ fill: "var(--muted)" }} />
-                <Bar dataKey="count" fill="var(--color-count)" radius={[2, 2, 0, 0]} />
+                <ChartTooltip
+                  content={
+                    <ChartTooltipContent
+                      labelFormatter={(l) =>
+                        `≈ ${Number(l).toFixed(1)} ${unit}`
+                      }
+                    />
+                  }
+                  cursor={{ fill: "var(--muted)" }}
+                />
+                {isolated !== null && (
+                  <Bar
+                    dataKey="selected"
+                    stackId="population"
+                    fill="var(--color-selected)"
+                    isAnimationActive={false}
+                  />
+                )}
+                <Bar
+                  dataKey="count"
+                  stackId="population"
+                  fill="var(--color-count)"
+                  fillOpacity={isolated === null ? 0.8 : 0.18}
+                  radius={[2, 2, 0, 0]}
+                  isAnimationActive={false}
+                />
+                <ReferenceLine
+                  x={stat.mean}
+                  stroke="var(--foreground)"
+                  strokeOpacity={0.45}
+                  strokeDasharray="3 3"
+                />
               </BarChart>
             </ChartContainer>
-            <p className="mt-1 text-xs text-muted-foreground">{report.descriptor_docs?.[key]}</p>
+            <div className="mt-1 flex justify-between font-mono text-[9px] text-muted-foreground">
+              <span>{unit} · full observed range</span>
+              <span>dashed line = corpus mean</span>
+            </div>
+            <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+              {report.descriptor_docs?.[key]}
+            </p>
           </figure>
         );
       })}

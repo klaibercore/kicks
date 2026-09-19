@@ -34,10 +34,10 @@ from ..analysis.descriptors import compute_descriptors
 from ..analysis.evaluation import analyze_hit, score_sample
 from ..audio import effects
 from ..audio.constants import SAMPLE_RATE
-from ..audio.controls import correct_waveform
 from ..audio.mel import spectrogram as waveform_spectrogram
-from ..audio.vocoder import spec_to_audio
 from ..instruments import available, get_profile, normalize
+from ..synthesis.controlled import control_latent, render_controls
+from ..synthesis.identity import IdentityBasis
 from .auth import Auth, InsufficientCredits, User
 from .middleware import LRUCache, RateLimiter
 from .state import InstrumentState, ServerState
@@ -117,6 +117,13 @@ def slider_key(name: str) -> str:
     return "".join(ch for ch in name.lower() if ch.isalnum())
 
 
+def _texture_seed(request: Request) -> int:
+    raw = request.query_params.get("seed", "0")
+    if not re.fullmatch(r"[0-9]{1,10}", raw) or int(raw) > 2**32 - 1:
+        raise HTTPException(status_code=422, detail="seed must be an integer in [0, 4294967295]")
+    return int(raw)
+
+
 def _slider_positions(request: Request, inst: InstrumentState) -> list[float]:
     """Read slider positions in [0, 1], defaulting to centre.
 
@@ -142,11 +149,8 @@ def _slider_positions(request: Request, inst: InstrumentState) -> list[float]:
 # ---------------------------------------------------------------------------
 
 def _latent_for(request: Request, inst: InstrumentState) -> torch.Tensor:
-    values = slider_positions_to_axis_values(_slider_positions(request, inst), inst.basis)
-    if inst.basis.is_descriptor_basis:
-        z = inst.basis.basis.solve(values, measure_fn=inst.response)
-    else:
-        z = inst.basis.basis.inverse_transform([values])
+    z = control_latent(inst.basis, inst.response, _slider_positions(request, inst),
+                       seed=_texture_seed(request))
     return torch.tensor(z, dtype=torch.float32).to(state.device)
 
 
@@ -157,24 +161,19 @@ def _synthesize(request: Request, inst: InstrumentState) -> tuple[torch.Tensor, 
     the client receives, shaping included.
     """
     positions = _slider_positions(request, inst)
+    seed = _texture_seed(request)
     attack_ms = _float_param(request, "attack_ms")
     decay_ms = _float_param(request, "decay_ms")
     drive = _float_param(request, "drive")
     cutoff = _float_param(request, "filter")
     vocoder = state.vocoder_for(inst.profile)
-    key = repr((id(inst.model), id(vocoder), positions, attack_ms, decay_ms, drive, cutoff))
+    key = repr((id(inst.model), id(inst.basis), id(vocoder), positions, seed, attack_ms, decay_ms, drive, cutoff))
     cached = render_cache.get(key)
     if cached is not None:
         return cached
-    z = _latent_for(request, inst)
-    with torch.no_grad():
-        spec = inst.model.decode(z)
-    waveform = spec_to_audio(spec, vocoder, state.device)  # (B, T)
-
+    spec, waveform = render_controls(inst.model, inst.basis, inst.profile, inst.response,
+                                     vocoder, state.device, positions, seed=seed)
     wf = waveform.squeeze(0)
-    if inst.basis.is_descriptor_basis and inst.profile.waveform_controls:
-        targets = slider_positions_to_axis_values(positions, inst.basis)
-        wf = correct_waveform(wf, np.array(targets), np.array(inst.basis.maxs) - inst.basis.mins, inst.profile)
     if attack_ms is not None or decay_ms is not None:
         wf = effects.apply_envelope(wf, attack_ms, decay_ms)
     if drive is not None:
@@ -261,6 +260,7 @@ async def config(request: Request) -> dict:
         "vocoder": state.vocoder_type_for(profile),
         "control": state.control_basis,
         "calibration": inst.basis.calibration,
+        "variation": isinstance(inst.basis.basis, IdentityBasis),
     }
 
 
@@ -314,6 +314,16 @@ async def evaluate(
                 "descriptors": descriptors}
 
     report = score_sample("api", metrics, inst.reference(), inst.profile)
+    control_fit = None
+    if isinstance(inst.basis.basis, IdentityBasis):
+        targets = np.array(slider_positions_to_axis_values(_slider_positions(request, inst), inst.basis))
+        measured = np.array([descriptors[key] for key in inst.profile.descriptor_keys])
+        span = np.maximum(np.array(inst.basis.maxs) - inst.basis.mins, 1e-6)
+        error = float(np.max(np.abs((measured - targets) / span)))
+        control_fit = {"max_normalized_error": error, "limited": error > .05,
+                       "targets": dict(zip(inst.profile.descriptor_keys, targets.tolist())),
+                       "seed": _texture_seed(request),
+                       "includes_effects": any(k in request.query_params for k in ("attack_ms", "decay_ms", "drive", "filter"))}
     return {
         "instrument": inst.profile.name,
         "score": report.score,
@@ -326,6 +336,7 @@ async def evaluate(
         ],
         "metrics": metrics,
         "descriptors": descriptors,
+        "control_fit": control_fit,
     }
 
 
@@ -353,13 +364,14 @@ async def spectrogram(
 _SAFE_NAME = re.compile(r"[^a-z0-9]+")
 
 
-def _export_filename(inst: InstrumentState, positions: list[float]) -> str:
+def _export_filename(inst: InstrumentState, positions: list[float], seed: int = 0) -> str:
     """``kick_sub80_punch50_....wav`` — the settings, readable in a file browser."""
     parts = [
         f"{_SAFE_NAME.sub('', name.lower())}{round(p * 100):02d}"
         for name, p in zip(inst.basis.names, positions)
     ]
-    return f"{inst.profile.name}_{'_'.join(parts)}.wav"
+    suffix = f"_v{seed}" if seed else ""
+    return f"{inst.profile.name}_{'_'.join(parts)}{suffix}.wav"
 
 
 @app.post("/export")
@@ -379,6 +391,7 @@ async def export(
 
     inst = _resolve(request)
     positions = _slider_positions(request, inst)
+    seed = _texture_seed(request)
     export_id = request.headers.get("idempotency-key") or str(uuid.uuid4())
     try:
         uuid.UUID(export_id)
@@ -388,6 +401,7 @@ async def export(
     params = {
         "instrument": inst.profile.name,
         "sliders": dict(zip(inst.basis.names, positions)),
+        "seed": seed,
         "control": state.control_basis,
         "vocoder": state.vocoder_type_for(inst.profile),
         **{k: v for k, v in request.query_params.items()
@@ -415,7 +429,7 @@ async def export(
         buf,
         media_type="audio/wav",
         headers={
-            "Content-Disposition": f'attachment; filename="{_export_filename(inst, positions)}"',
+            "Content-Disposition": f'attachment; filename="{_export_filename(inst, positions, seed)}"',
             "X-Kicks-Credits-Remaining": str(remaining),
             "X-Kicks-Export-Id": generation_id,
             "Cache-Control": "no-store",

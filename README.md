@@ -114,7 +114,7 @@ local development; billed exports require the Supabase setup described below.
 | Open | What you will find |
 |:---|:---|
 | **[Studio](http://localhost:3000/studio/)** | Instrument controls, envelope/drive/filter effects, waveform and spectrogram views, realism checks, MIDI pads and kits |
-| **[Analysis](http://localhost:3000/analysis/)** | Cluster audio, PCA scatter plots, descriptor correlations and distributions |
+| **[Analysis](http://localhost:3000/analysis/)** | Interactive 3D corpus atlas, sound-family profiles and audio, clustering evidence and linked sample inspection |
 | **[Training dashboard](http://127.0.0.1:6060/)** | Live experiments and their notebooks; start with `uv run kicks dashboard` |
 | **[API docs](http://localhost:8080/docs)** | Interactive FastAPI endpoint reference |
 
@@ -408,9 +408,15 @@ and attack terms extend that objective; waveform evaluation is a separate step.
 - **Latents:** a Gaussian-mixture prior is fitted to corpus encodings for batch
   generation; best-of-*k* selection uses corpus-referenced evaluation.
 - **Controls:** the default descriptor basis solves for target measurements,
-  followed by waveform correction to reduce vocoder drift. PCA controls remain available.
+  followed by waveform correction to reduce vocoder drift. Snare and hi-hat
+  controls retain a corpus texture, use median-centered percentile travel, and
+  cap correction at ±6 dB. Extreme combinations can remain coupled; the studio
+  reports this in its corpus comparison. **New variation** changes the texture
+  while retaining settings, and pads preserve that variation. PCA controls remain available.
 - **Calibration:** `<checkpoint-stem>.controls.npz` stores the basis and ranges.
-  Checkpoint, profile, corpus or calibration-version changes invalidate it.
+  Corpus-anchored controls use a separate `.identity.npz` cache. Checkpoint,
+  profile, corpus or calibration-version changes invalidate the corresponding cache.
+  See the [identity plan and measured results](docs/audio-identity-plan.md).
 - **Profiles:** adding an instrument starts in `kicks/instruments/`; descriptors,
   windows, metrics and vocoder choice belong there.
 
@@ -434,6 +440,24 @@ uv run kicks --help
 
 Published analysis removes corpus filenames and paths. Keep full local fidelity
 reports private: those contain source paths and the selected hit filenames.
+
+The corpus atlas connects an overview, rotatable 3D / orthographic 2D projections,
+sound-family profiles, descriptor distributions, and a searchable sample table.
+Switch between standardized descriptor PCA and latent PCA; the page shows the
+variance retained by each view. Family selection links the map, distributions
+and table, and the uncertainty filter exposes membership probabilities below 80%.
+Descriptor charts use native dB/ms units; family profiles compare means in standard
+deviations, with names derived from the largest measured differences.
+
+Clustering removes constant latent dimensions, standardizes the remainder and
+retains at least 95% of their variance with PCA. BIC compares 1–16 mixture
+components with full and diagonal covariance, three seeded initializations and
+covariance regularization. The winning converged fit is reused. Reports include
+candidate scores, sampled silhouette, uncertainty, projection coverage and a
+search-boundary flag. These describe the fitted model, not validated musical
+categories. Family IDs are ordered by population within each report and may
+change when the corpus or model changes. Averaged audio is phase-sensitive and
+can differ from a typical individual member.
 
 </details>
 
@@ -460,7 +484,10 @@ curl "http://localhost:8080/evaluate?instrument=snare&crack=0.9"
 
 Slider parameters accept `s1..sN`, legacy `pc1..pcN` or the exposed slider label;
 omitted values default to the center. Effects use `attack_ms`, `decay_ms`,
-`drive` and `filter`. Synthesis is limited by a shared 10 requests/second token
+`drive` and `filter`. Snare/hi-hat requests also accept an integer `seed` in
+`[0, 4294967295]` (default `0`) for reproducible texture selection; `/config`
+advertises support with `variation: true`. Preview, evaluation, spectrogram and
+export share that seed. Synthesis is limited by a shared 10 requests/second token
 bucket and uses a 100-entry LRU cache.
 
 Without Supabase the local API is open and billed export is unavailable.

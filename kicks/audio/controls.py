@@ -63,6 +63,9 @@ def correct_waveform(
     targets: np.ndarray,
     spans: np.ndarray,
     profile: InstrumentProfile,
+    *,
+    max_gain_db: float = 40.0,
+    regularization: float = 0.0,
 ) -> torch.Tensor:
     """Return a mono waveform matching the calibrated, gain-invariant controls.
 
@@ -71,6 +74,8 @@ def correct_waveform(
     """
     if not profile.waveform_controls:
         return waveform
+    if not np.isfinite(max_gain_db) or not 0 < max_gain_db <= 40 or not np.isfinite(regularization) or regularization < 0:
+        raise ValueError("correction gain must be in (0, 40] dB and regularization nonnegative")
     if waveform.ndim != 1 or not torch.isfinite(waveform).all():
         raise ValueError("waveform correction expects finite mono audio")
     waveform = waveform.detach().cpu().float()
@@ -78,6 +83,9 @@ def correct_waveform(
         return waveform
     target = np.asarray(targets, dtype=np.float64)
     span = np.maximum(np.asarray(spans, dtype=np.float64), 1e-6)
+    if target.shape != (len(profile.descriptors),) or span.shape != target.shape or not np.isfinite(target).all() or not np.isfinite(span).all():
+        raise ValueError("targets and spans must be finite and match the descriptor count")
+    max_log_gain = max_gain_db * np.log(10) / 20
     window = torch.hann_window(N_FFT)
     original = torch.stft(waveform, N_FFT, HOP_LENGTH, window=window, return_complex=True)
     masks = _control_masks(profile, original.shape[-1])
@@ -86,7 +94,7 @@ def correct_waveform(
     def render(parameters):
         parameters = torch.as_tensor(np.atleast_2d(parameters), dtype=torch.float32)
         gain = torch.einsum("bd,dft->bft", parameters, masks)
-        spectrum = original[None] * gain.clamp(-np.log(100), np.log(100)).exp()
+        spectrum = original[None] * gain.clamp(-max_log_gain, max_log_gain).exp()
         audio = torch.istft(spectrum, N_FFT, HOP_LENGTH, window=window, length=len(waveform))
         return audio / audio.abs().amax(dim=-1, keepdim=True).clamp_min(1e-8)
 
@@ -94,13 +102,15 @@ def correct_waveform(
         return descriptor_tensor(spectrogram(render(parameters)), profile).numpy().astype(np.float64)
 
     def residual(parameters):
-        return (measure(parameters)[0] - target) / span
+        error = (measure(parameters)[0] - target) / span
+        return np.r_[error, regularization * parameters] if regularization else error
 
     def jacobian(parameters):
         step = 0.005
         delta = np.eye(count) * step
         measured = measure(np.vstack([parameters + delta, parameters - delta]))
-        return ((measured[:count] - measured[count:]) / (2 * step) / span).T
+        jac = ((measured[:count] - measured[count:]) / (2 * step) / span).T
+        return np.vstack([jac, regularization * np.eye(count)]) if regularization else jac
 
     result = least_squares(
         residual, np.zeros(count), jac=jacobian, bounds=(-3, 3), tr_solver="lsmr",

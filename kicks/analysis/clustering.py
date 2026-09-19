@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 
 import numpy as np
 import soundfile as sf
@@ -22,7 +23,7 @@ from ..config import get_device, load_vae_from_checkpoint
 from ..data import DrumDataset
 from ..instruments import InstrumentProfile, get_profile
 from .descriptors import correlation_matrix, descriptor_matrix, descriptor_stats
-from .latents import extract_latents, fit_gmm, select_n_clusters
+from .latents import analyze_clusters, extract_latents
 
 #: Descriptor-space components kept for the scatter plots.
 N_REPORT_PCS = 3
@@ -51,12 +52,16 @@ def _cluster_average_audio(paths: list[str]) -> np.ndarray:
     contains. Phase cancellation is the point: only what the members share
     survives.
     """
-    stack = []
+    total = torch.zeros(1, AUDIO_LENGTH)
+    count = 0
     for path in paths:
         audio = io.load_waveform(path, target_lufs=None, length=AUDIO_LENGTH)
         if audio is not None:
-            stack.append(audio)
-    avg = torch.stack(stack).mean(dim=0)
+            total += audio
+            count += 1
+    if not count:
+        raise ValueError("No readable audio in cluster")
+    avg = total / count
     return (avg / (avg.abs().max() + 1e-8)).squeeze(0).numpy()
 
 
@@ -77,7 +82,7 @@ def run_cluster(
     dataset = DrumDataset(data, profile)
     total = len(dataset)
     if n_samples and n_samples < total:
-        indices = np.random.choice(total, n_samples, replace=False).tolist()
+        indices = sorted(np.random.default_rng(42).choice(total, n_samples, replace=False).tolist())
         subset: Subset | DrumDataset = Subset(dataset, indices)
     else:
         subset = dataset
@@ -98,9 +103,10 @@ def run_cluster(
     # GMM on z-scored latents: without scaling, the few high-variance dimensions
     # dominate the covariance and every cluster boundary follows them alone.
     print("Running GMM clustering on normalized latents...")
-    best_k, _ = select_n_clusters(_zscore(latents), max_k=10)
+    clustering = analyze_clusters(latents)
+    best_k = clustering["diagnostics"]["selected_k"]
     print(f"BIC selected k={best_k}")
-    _, labels, probs = fit_gmm(_zscore(latents), best_k)
+    labels, probs = clustering["labels"], clustering["probabilities"]
     for k in range(best_k):
         print(f"  Cluster {k}: {(labels == k).sum()} samples")
 
@@ -108,7 +114,7 @@ def run_cluster(
     desc = descriptor_matrix(spectrograms, profile)
 
     print("Computing PCA on normalized descriptors...")
-    pca = PCA(n_components=min(N_REPORT_PCS, len(keys)))
+    pca = PCA(n_components=min(N_REPORT_PCS, len(keys), len(desc)))
     desc_pca = pca.fit_transform(_zscore(desc))
     print(f"Descriptor PCA variance ratio: {pca.explained_variance_ratio_}")
     print(f"  (cumulative: {pca.explained_variance_ratio_.cumsum()})")
@@ -132,6 +138,8 @@ def run_cluster(
             "duration_ms": float(info.frames / info.samplerate * 1000),
         }
         row.update({name: float(desc_pca[i, j]) for j, name in enumerate(pc_labels)})
+        row.update({f"latent{j + 1}": float(clustering["projection"][i, j]) for j in range(3)})
+        row["entropy"] = float(clustering["entropy"][i])
         samples.append(row)
 
     # Name each descriptor-PC after its strongest unclaimed descriptor.
@@ -160,13 +168,24 @@ def run_cluster(
 
     cluster_profiles = {}
     cluster_averages = {}
+    cluster_details = {}
     for k in range(best_k):
         mask = labels == k
+        if not mask.any():
+            continue
         cluster_profiles[str(k)] = {
             "count": int(mask.sum()),
             **{key: float(desc[mask, j].mean()) for j, key in enumerate(keys)},
         }
         cluster_averages[str(k)] = latents[mask].mean(axis=0).tolist()
+        members = np.flatnonzero(mask)
+        features = clustering["features"][mask]
+        representative = members[np.argmin(np.linalg.norm(features - features.mean(axis=0), axis=1))]
+        cluster_details[str(k)] = {
+            "mean_confidence": float(probs[mask].max(axis=1).mean()),
+            "ambiguous_count": int((probs[mask].max(axis=1) < .8).sum()),
+            "representative_idx": int(representative),
+        }
 
     print("Generating cluster average audio...")
     samples_dir = profile.paths.samples_dir
@@ -183,6 +202,8 @@ def run_cluster(
         print(f"  Saved cluster {k} average ({len(member_paths)} samples)")
 
     output = {
+        "schema_version": 2,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "instrument": profile.name,
         "descriptor_keys": keys,
         "descriptor_labels": profile.descriptor_labels,
@@ -208,6 +229,9 @@ def run_cluster(
             for i, k1 in enumerate(keys)
         },
         "cluster_profiles": cluster_profiles,
+        "cluster_details": cluster_details,
+        "clustering": clustering["diagnostics"],
+        "latent_projection": {"method": "pca", "variance_explained": clustering["projection_variance"]},
         "descriptor_stats": descriptor_stats(desc, profile),
     }
 

@@ -35,6 +35,8 @@ export interface InstrumentConfig {
   /** The backend this instrument renders with. */
   vocoder: string;
   control: "pca" | "descriptor";
+  /** Supports a stable drum texture independently of slider settings. */
+  variation?: boolean;
 }
 
 export interface Verdict {
@@ -53,6 +55,13 @@ export interface Evaluation {
   verdicts?: Verdict[];
   metrics?: Record<string, number>;
   descriptors: Record<string, number>;
+  control_fit?: {
+    max_normalized_error: number;
+    limited: boolean;
+    targets: Record<string, number>;
+    seed: number;
+    includes_effects: boolean;
+  } | null;
   error?: string;
 }
 
@@ -92,6 +101,8 @@ export interface Effects {
 /** A complete, reproducible sound: which instrument, where every slider sits, which effects. */
 export interface Sound {
   instrument: InstrumentName;
+  /** Omitted in older presets; the server treats it as the default texture. */
+  seed?: number;
   /** Slider key -> position in [0, 1]. Keys come from InstrumentConfig.sliders. */
   sliders: Record<string, number>;
   effects: Effects;

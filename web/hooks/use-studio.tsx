@@ -39,6 +39,7 @@ interface StudioContextValue {
   setEffect: <K extends keyof Effects>(key: K, value: Effects[K]) => void;
   reset: () => void;
   randomize: () => void;
+  newVariation: () => void;
   loadSound: (sound: Sound) => void;
 
   buffer: AudioBuffer | null;
@@ -219,6 +220,11 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     }));
   }, [config, update]);
 
+  const newVariation = useCallback(() => {
+    if (!config?.variation) return;
+    update((s) => ({ ...s, seed: crypto.getRandomValues(new Uint32Array(1))[0] }));
+  }, [config, update]);
+
   const loadSound = useCallback(
     (next: Sound) => {
       pendingSound.current = next;
@@ -310,14 +316,14 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   const value = useMemo<StudioContextValue>(
     () => ({
       status, health, instruments, configs, active, setActive, sound, config,
-      setSlider, setEffect, reset, randomize, loadSound,
+      setSlider, setEffect, reset, randomize, newVariation, loadSound,
       buffer, rendering, preview, autoAudition, setAutoAudition, commit,
       evaluation, evaluating, evaluate, spectrogram, loadSpectrogram,
       exporting, exportSample, bufferFor,
     }),
     [
       status, health, instruments, configs, active, setActive, sound, config,
-      setSlider, setEffect, reset, randomize, loadSound,
+      setSlider, setEffect, reset, randomize, newVariation, loadSound,
       buffer, rendering, preview, autoAudition, commit,
       evaluation, evaluating, evaluate, spectrogram, loadSpectrogram,
       exporting, exportSample, bufferFor,
