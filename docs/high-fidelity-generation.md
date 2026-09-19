@@ -157,6 +157,13 @@ Latent audio diffusion is an established approach, but the quality and training
 cost of a small drum-specific implementation remain to be measured here.
 [Latent audio diffusion](https://arxiv.org/abs/2402.04825).
 
+A simpler variant — diffusion directly on the 65,536-sample waveform, with no
+codec and no vocoder — is implemented and untrained in `kicks/nn/diffusion.py`;
+[`docs/waveform-diffusion.md`](waveform-diffusion.md) records its design, the
+8 GB Apple Silicon cost measurements, the staged run sequence and two known
+issues to fix before collecting evidence. It is the first candidate for this
+stage; the codec-latent prior above remains a proposal.
+
 ## Acceptance criteria
 
 - Split by source pack or sample family where possible, and check for near

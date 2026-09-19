@@ -14,6 +14,14 @@ as recorded under [Decisions](#decisions-taken); the rest of the plan — traini
 the fidelity and control audits, blind listening, latency benchmarking — is
 still ahead.
 
+Reviewed and merged into `main` on 2026-09-19. The review ran the test module
+and a step-time / memory probe of the untrained network on an Apple M1 with
+8 GB of unified memory; those figures are under
+[Apple Silicon and other 8 GB machines](#apple-silicon-and-other-8-gb-machines).
+It also found two defects, listed under [Known issues](#known-issues). They are
+not fixed yet; the second one must be fixed before any control evidence is
+collected with `diffusion-generate`.
+
 ## What it is
 
 A 1-D U-Net denoises a raw waveform directly. Neither the VAE nor a vocoder is
@@ -165,6 +173,64 @@ Checkpoints: `diffusion_best.pth` (lowest validation loss), `diffusion_best_cont
 (lowest `control_mae`, only written when `--eval-every` is on),
 `diffusion_checkpoint.pth` (final), `diffusion_loss_curves.png`.
 
+### Apple Silicon and other 8 GB machines
+
+Measured on 2026-09-19: Apple M1, 8 GB unified memory, torch 2.10, MPS backend,
+the default 9.56 M-parameter network, random data, one forward/backward/Adam
+step. `torch.mps.recommended_max_memory()` reports 5.33 GiB. These are
+throughput and memory figures for an *untrained* network; they say nothing
+about how the backend sounds.
+
+| Setting | Step time | MPS memory (driver-allocated) |
+|---|---|---|
+| batch 1 | 0.48 s | 1.5 GiB |
+| **batch 2** | **0.65 s** | **1.7 GiB** |
+| batch 4 | 1.29 s | 3.4 GiB |
+| batch 4, `torch.autocast` fp16 | 3.07 s — slower, no memory saved | 3.5 GiB |
+| batch 8 (the CLI default) | 20.7 s — over the working set, 8× slower per sample | 6.4 GiB |
+| CPU, batch 2 | 1.16 s — MPS is 1.8× faster | — |
+
+Consequences:
+
+* Use `--batch-size 2 --grad-accum 16` (effective batch 32, the documented
+  default) on an 8 GB machine. The CLI defaults of `8` / `4` are right for a
+  discrete GPU and wrong here; do not use autocast on MPS.
+* Cost saturates at about 0.32 s per hit per epoch, so with the current corpora
+  one epoch is roughly 27 min for hi-hats (5,824 hits), 38 min for snares
+  (7,994) and 48 min for kicks (10,109). The 200-epoch default is four to seven
+  days per instrument; plan short screens and resumable chunks instead.
+* Sampling costs 6.4 s per hit at 50 steps and 1.95 s at 10 steps (batch 1),
+  so `--eval-every`, `--preview` and audits are expensive; budget for them.
+* `WaveformDataset` keeps the whole corpus in RAM as float32: 2.47 GiB for
+  kicks, 1.95 GiB for snares, 1.42 GiB for hi-hats, in the same 8 GB the GPU
+  uses. Stop `kicks serve` and `next dev` before training; a compact in-memory
+  format (int16 or float16) is a planned change, not a shipped one.
+* Run long jobs under `caffeinate -i` inside tmux or `nohup` so sleep or a
+  closed terminal does not kill them. A hard kill leaves the run `running`;
+  the dashboard marks it stale. Watch `epoch_seconds` — a fanless M1 throttles.
+
+Suggested sequence, hi-hat first (the identity problem, the smallest corpus,
+the fastest epochs), then snare:
+
+1. **Smoke test, about ten minutes.** A 64-file directory of symlinks passed
+   with `--data`, `--epochs 2 --batch-size 2 --grad-accum 4 --eval-every 1
+   --eval-samples 4 --eval-steps 10`, its own `--model-dir`. Confirms the loop,
+   the dashboard retargeting, the EMA checkpoint and `diffusion-generate`.
+2. **Overnight screen, 20 epochs.** Full corpus, `--batch-size 2 --grad-accum 16
+   --eval-every 5 --preview 0`, notebook filled in. Record that the cosine
+   schedule spans only these 20 epochs. Sample eight hits at 50 steps and
+   listen; a falling `val_loss_low_sigma` with samples that are still noise is
+   normal this early, a flat one is the stop signal.
+3. **Long run in chunks** via `--resume`, 50 epochs at a time. `--resume`
+   starts a fresh optimizer and restarts the cosine schedule, and its
+   learning-rate default is 3e-5, so pass `--learning-rate 1e-4` to continue at
+   the new-model rate and note the warm restart in the notebook.
+
+Evidence stays the same as for the VAE: `kicks eval --pattern 'diff_*.wav'`
+for set-level corpus distance, level-matched blind listening against studio
+renders, and the achieved-versus-target print-out as a control proxy only.
+`kicks fidelity` and `scripts/validate_controls.py` are VAE-specific.
+
 ## Generation
 
 ```bash
@@ -182,6 +248,13 @@ that the rest of the hit holds still — that is what a control audit measures.
 Each sample prints its achieved descriptor values against its targets and its
 raw peak. A sample is scaled down only if it would clip on write, so a model
 whose output level drifts off the corpus stays visible.
+
+**Known issue.** `draw_labels()` draws every unpinned descriptor from an
+independent Gaussian with the training split's mean and standard deviation.
+The descriptors are neither Gaussian nor independent, so many targets lie
+outside anything the model saw; see [Known issues](#known-issues) for the
+numbers. Until this is fixed, treat default `diffusion-generate` targets as
+off-distribution and pin descriptors to corpus percentiles by hand.
 
 ## Decisions taken
 
@@ -209,8 +282,9 @@ Everything the issue asks for after implementation:
 - No rendering-latency benchmark, so no claim about interactive use. At 50 steps
   the denoiser runs 50 times per hit, doubled under guidance; whether that is
   fast enough for a slider release is unmeasured.
-- No MPS or CUDA performance figures. The code selects a device through the
-  project's usual `get_device()` and has been exercised on CPU only.
+- No CUDA performance figures, and no throughput figure from a real epoch. The
+  MPS step-time and memory probe above used random data on an untrained
+  network; training itself has not run on any device.
 - Splits are fingerprinted the same way the VAE's are, with the same limitation:
   the fingerprint covers paths, sizes and mtimes, not content, so it does not
   detect near-duplicates or pack leakage. The issue asks for splits by
@@ -220,3 +294,32 @@ Everything the issue asks for after implementation:
 A promotion path does not exist for this backend, and `kicks promote` still
 means the VAE checkpoint. Deciding whether the backend is worth keeping needs
 the evidence above, not the code alone.
+
+## Known issues
+
+Found in the 2026-09-19 review; neither is fixed in this revision.
+
+1. **Descriptor targets are drawn off the corpus manifold.** `draw_labels()` in
+   `kicks/synthesis/diffusion.py` samples each descriptor independently from
+   `N(mean, std)` of the training split. From the published corpus statistics
+   (`web/public/analysis/*.json`), `decay` alone comes out negative — a
+   physically impossible target — in about 29 % of snare draws (mean 38 ms,
+   std 70 ms, median ≈ 19 ms), 16 % of hi-hat draws and 17 % of kick draws,
+   and the strongest descriptor correlations (snare body↔snap −0.68, hi-hat
+   body↔bright −0.84) are ignored. This is the same "centred between extremes"
+   failure `docs/audio-identity-plan.md` fixed for the VAE studio path.
+   Training is unaffected, because training labels are measured, and the
+   in-loop `control_mae` proxy resamples real validation labels, so the proxy
+   can look healthy while default generation produces blips. Planned fix:
+   save the training split's label matrix in the checkpoint and resample rows
+   from it (nearest rows when a descriptor is pinned), keeping the Gaussian
+   only as a fallback for checkpoints without that bank.
+2. **The trailing gradient-accumulation group is under-weighted.** The loop
+   scales every micro-batch loss by `1 / grad_accum` and steps at
+   `index % grad_accum == 0 or index == len(train_loader)`, so when the number
+   of micro-batches is not a multiple of `--grad-accum` the last optimizer
+   step of each epoch sees a gradient scaled by `remainder / grad_accum`, and
+   with `drop_last=False` a short final micro-batch's mean counts as a full
+   one. One step in a few hundred per epoch — harmless in practice, and the
+   recorded `train_loss` is already size-weighted — but `drop_last=True` on the
+   training loader removes it. Planned alongside the fix above.

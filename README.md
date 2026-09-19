@@ -479,8 +479,17 @@ uv run kicks diffusion-generate -i kick -n 8 --steps 50 --target punch=9
 
 Runs land in the same dashboard as VAE runs. `--seed` is the texture seed and
 `--target` pins a slider, so one can be held while the other moves.
-`docs/waveform-diffusion.md` has the design, the decisions behind it and the
-full list of what has not been measured.
+
+On an 8 GB Apple Silicon Mac, pass `--batch-size 2 --grad-accum 16`: the
+default batch of 8 exceeds the MPS working set and runs about 8× slower per
+sample. Measured on an M1, one epoch costs roughly 27 min for hi-hats, 38 min
+for snares and 48 min for kicks, and one 50-step sample takes about 6 s, so
+train in short screens and resumable chunks, hi-hat first. Default
+`diffusion-generate` targets are currently drawn off the corpus distribution
+(a known issue); pin descriptors until that is fixed.
+[`docs/waveform-diffusion.md`](docs/waveform-diffusion.md) has the design, the
+measurements, the staged run sequence and the full list of what has not been
+measured.
 
 </details>
 
@@ -598,9 +607,9 @@ site is static; serve `web/out/` to preview the production build.
 | Directory | Responsibility |
 |:---|:---|
 | `kicks/instruments/` | Profiles, descriptors, windows, paths and backend defaults |
-| `kicks/audio/`, `kicks/data/` | Waveforms, preprocessing, mels, effects and vocoders |
-| `kicks/nn/` | VAE, residual/latent options and DisCoder inference |
-| `kicks/training/` | Losses, training, telemetry, HTML dashboard, evidence and promotion |
+| `kicks/audio/`, `kicks/data/` | Waveforms, preprocessing, mels, effects, vocoders; spectrogram and waveform datasets |
+| `kicks/nn/` | VAE, residual/latent options, the waveform diffusion U-Net and DisCoder inference |
+| `kicks/training/` | Losses, the VAE and diffusion training loops, telemetry, HTML dashboard, evidence and promotion |
 | `kicks/analysis/` | Calibration, evaluation, waveform fidelity, clustering and publishing |
 | `kicks/synthesis/`, `kicks/corpus/` | Generation and corpus preparation |
 | `kicks/api/` | FastAPI, auth, credits, caching and instrument state |
@@ -617,6 +626,8 @@ For implementation contracts and agent instructions, see [CLAUDE.md](CLAUDE.md).
 <p align="center">
   <strong>Shape it. Measure it. Listen again.</strong><br>
   <a href="docs/high-fidelity-generation.md">Fidelity plan</a> ·
+  <a href="docs/audio-identity-plan.md">Identity plan</a> ·
+  <a href="docs/waveform-diffusion.md">Waveform diffusion</a> ·
   <a href="CLAUDE.md">Contributor / agent guide</a> ·
   <a href="LICENSE">MIT license</a>
 </p>

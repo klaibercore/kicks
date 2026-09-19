@@ -44,7 +44,10 @@ from reconstruction of held-out examples.
 No model training is required to test these changes. If anchors preserve identity
 but the decoder's own reconstruction still sounds inadequate, use the existing
 tracked HF/attack-loss and capacity experiments before considering a new codec
-sequence model. Never train or promote against a descriptor score alone.
+sequence model. The untrained waveform diffusion backend
+([`waveform-diffusion.md`](waveform-diffusion.md)) is the tracked alternative
+once that ceiling is confirmed, hi-hat first. Never train or promote against a
+descriptor score alone.
 
 ## Implementation and measured outcome
 
