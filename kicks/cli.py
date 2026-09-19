@@ -172,6 +172,173 @@ def train(
     print("Done!")
 
 
+@app.command("diffusion-train")
+def diffusion_train(
+    instrument: str = INSTRUMENT,
+    data: str = typer.Option(None, "--data", "-d", help="Corpus directory"),
+    epochs: int = typer.Option(200, "--epochs", "-e", help="Number of training epochs"),
+    batch_size: int = typer.Option(8, "--batch-size", "-b", help="Micro-batch size; waveform activations are far larger than spectrogram ones"),
+    grad_accum: int = typer.Option(4, "--grad-accum", help="Micro-batches per optimizer step (effective batch = batch size x this)"),
+    learning_rate: float = typer.Option(None, "--learning-rate", help="Defaults to 3e-5 for fine-tuning, 1e-4 for a new model"),
+    cond_dropout: float = typer.Option(0.1, "--cond-dropout", min=0.0, max=0.99, help="Fraction of samples trained unconditioned; enables guidance at sampling (0 = off)"),
+    ema_decay: float = typer.Option(0.999, "--ema-decay", min=0.0, max=0.9999, help="EMA decay for the weights that are validated and saved"),
+    channels: str = typer.Option(None, "--channels", help="Comma-separated feature widths per scale"),
+    factors: str = typer.Option(None, "--factors", help="Comma-separated length reduction per scale (1 or even)"),
+    cond_dim: int = typer.Option(128, "--cond-dim", min=8, help="Width of the noise/descriptor conditioning embedding"),
+    blocks: int = typer.Option(2, "--blocks", min=1, help="Residual blocks per encoder and decoder stage"),
+    attention_scales: int = typer.Option(3, "--attention-scales", min=0, help="Deepest scales that get self-attention"),
+    attention_heads: int = typer.Option(4, "--attention-heads", min=1, help="Attention heads per attention block"),
+    val_split: float = typer.Option(0.1, "--val-split", min=0.01, max=0.9, help="Validation fraction of the corpus"),
+    eval_every: int = typer.Option(0, "--eval-every", min=0, help="Epochs between descriptor-target proxies; each one costs a full sampling pass (0 = off)"),
+    eval_steps: int = typer.Option(20, "--eval-steps", min=1, help="Sampler steps used by the descriptor-target proxy"),
+    eval_samples: int = typer.Option(8, "--eval-samples", min=1, help="Validation hits resampled for the descriptor-target proxy"),
+    eval_guidance: float = typer.Option(1.0, "--eval-guidance", help="Guidance scale used by the descriptor-target proxy"),
+    preview: int = typer.Option(0, "--preview", min=0, help="Hits to sample after training; each one costs a full sampling pass"),
+    preview_steps: int = typer.Option(50, "--preview-steps", min=1, help="Sampler steps for the post-training previews"),
+    resume: str = typer.Option(None, "--resume", help="Fine-tune this diffusion checkpoint with a fresh optimizer"),
+    model_dir: str = typer.Option(None, "--model-dir", help="Root for this run's candidate weights"),
+    seed: int = typer.Option(42, "--seed", help="Reproducible initialization, split and noise draws"),
+    run_name: str = typer.Option(None, "--run-name", help="Name shown in the training dashboard"),
+    intent: str = typer.Option("", "--intent", help="Audible problem this experiment should solve"),
+    hypothesis: str = typer.Option("", "--hypothesis", help="What changed and why it should help"),
+    success_criteria: str = typer.Option("", "--success-criteria", help="Metrics and listening checks required for success"),
+    runs_dir: str = typer.Option(None, "--runs-dir", help="Training records root (default: output/training or KICKS_RUNS_DIR)"),
+) -> None:
+    """Train the descriptor-conditioned waveform diffusion backend (issue #3)."""
+    import os
+
+    import torch
+    from torch import optim
+    from torch.optim.lr_scheduler import CosineAnnealingLR
+
+    from kicks.config import get_device, load_diffusion_from_checkpoint
+    from kicks.data import WaveformDataset
+    from kicks.instruments import get_profile
+    from kicks.nn import WaveformUNet
+    from kicks.nn.diffusion import DEFAULT_CHANNELS, DEFAULT_FACTORS
+    from kicks.synthesis.diffusion import draw_labels, sample_hits
+    from kicks.training import train_diffusion
+
+    def widths(text, fallback):
+        if not text:
+            return fallback
+        try:
+            values = tuple(int(part) for part in text.replace(" ", "").split(","))
+        except ValueError:
+            raise typer.BadParameter(f"expected comma-separated integers, got {text!r}") from None
+        if not values or any(v < 1 for v in values):
+            raise typer.BadParameter("every entry must be a positive integer")
+        return values
+
+    if model_dir:
+        # This backend has no vocoder in its path, so only the weight root moves.
+        os.environ["KICKS_MODEL_DIR"] = model_dir
+    torch.manual_seed(seed)
+    profile = get_profile(instrument)
+    data = data or profile.paths.data_dir
+    os.makedirs(profile.paths.model_dir or ".", exist_ok=True)
+    os.makedirs(profile.paths.output_dir or ".", exist_ok=True)
+
+    architecture_flags = (channels, factors, cond_dim != 128, blocks != 2,
+                          attention_scales != 3, attention_heads != 4)
+    if resume and any(architecture_flags):
+        raise typer.BadParameter(
+            "architecture options describe a new model; a resumed checkpoint keeps its own",
+        )
+
+    device = get_device()
+    if resume:
+        model, _ = load_diffusion_from_checkpoint(resume, device, profile)
+    else:
+        model = WaveformUNet(
+            n_descriptors=len(profile.descriptors),
+            channels=widths(channels, DEFAULT_CHANNELS),
+            factors=widths(factors, DEFAULT_FACTORS),
+            cond_dim=cond_dim, blocks_per_scale=blocks,
+            attention_scales=attention_scales, attention_heads=attention_heads,
+        ).to(device)
+
+    dataset = WaveformDataset(data, profile, length=model.length)
+    lr = learning_rate if learning_rate is not None else (3e-5 if resume else 1e-4)
+    if lr <= 0:
+        raise typer.BadParameter("learning rate must be positive")
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
+
+    print(f"Denoiser: {sum(p.numel() for p in model.parameters()):,} parameters, "
+          f"{model.length} samples, {model.n_descriptors} descriptors, device={device}, "
+          f"channels={list(model.channels)}, factors={list(model.factors)}")
+
+    train_diffusion(
+        model, dataset, optimizer, profile,
+        epochs=epochs, device=device, batch_size=batch_size, val_split=val_split,
+        seed=seed, scheduler=scheduler, cond_dropout=cond_dropout,
+        ema_decay=ema_decay, grad_accum=grad_accum,
+        eval_every=eval_every, eval_steps=eval_steps, eval_samples=eval_samples,
+        eval_guidance=eval_guidance, source_checkpoint=resume,
+        run_name=run_name, intent=intent, hypothesis=hypothesis,
+        success_criteria=success_criteria, runs_dir=runs_dir,
+    )
+
+    if preview > 0:
+        import soundfile as sf
+
+        from kicks.audio.constants import SAMPLE_RATE
+
+        best, _ = load_diffusion_from_checkpoint(
+            profile.paths.diffusion_checkpoint, device, profile,
+        )
+        labels = draw_labels(best, preview, None, profile, seed)
+        waves = sample_hits(best, labels, steps=preview_steps, seed=seed, device=device)
+        for i, audio in enumerate(waves, 1):
+            path = os.path.join(profile.paths.output_dir, f"diff_{i}.wav")
+            sf.write(path, audio.numpy(), SAMPLE_RATE, subtype="PCM_24")
+        print(f"Wrote {preview} previews to {os.path.normpath(profile.paths.output_dir)}/")
+
+    print("Done!")
+
+
+@app.command("diffusion-generate")
+def diffusion_generate(
+    instrument: str = INSTRUMENT,
+    count: int = typer.Option(10, "--count", "-n", help="Number of samples to generate"),
+    checkpoint: str = typer.Option(None, "--checkpoint", help="Denoiser weights (default: the profile's diffusion_best.pth)"),
+    out: str = typer.Option(None, "--out", "-o", help="Output directory"),
+    steps: int = typer.Option(50, "--steps", min=1, help="Sampler steps; fewer is faster and coarser"),
+    guidance: float = typer.Option(1.0, "--guidance", help="Classifier-free guidance scale (1 = plain conditional)"),
+    seed: int = typer.Option(-1, "--seed", help="Texture seed: the starting noise (-1 = random)"),
+    label_seed: int = typer.Option(-1, "--label-seed", help="Seed for descriptor targets that were not given (-1 = random)"),
+    target: list[str] = typer.Option(None, "--target", "-t", metavar="KEY=VALUE", help="Pin one descriptor, in the profile's own units; repeatable"),
+    unconditional: bool = typer.Option(False, "--unconditional", help="Sample from the null embedding instead of descriptor targets"),
+    prefix: str = typer.Option("diff", "--prefix", help="Filename prefix for the written samples"),
+) -> None:
+    """Sample one-shots from the waveform diffusion backend (no VAE, no vocoder)."""
+    import random
+
+    from kicks.synthesis.diffusion import generate_diffusion
+
+    targets: dict[str, float] = {}
+    for item in target or []:
+        key, separator, value = item.partition("=")
+        if not separator:
+            raise typer.BadParameter(f"expected KEY=VALUE, got {item!r}")
+        try:
+            targets[key.strip()] = float(value)
+        except ValueError:
+            raise typer.BadParameter(f"{value!r} is not a number") from None
+
+    try:
+        generate_diffusion(
+            count=count, instrument=instrument, checkpoint=checkpoint, out_dir=out,
+            steps=steps, guidance=guidance,
+            seed=random.randrange(2 ** 31) if seed < 0 else seed,
+            label_seed=random.randrange(2 ** 31) if label_seed < 0 else label_seed,
+            targets=targets or None, unconditional=unconditional, prefix=prefix,
+        )
+    except (ValueError, FileNotFoundError) as error:
+        raise typer.BadParameter(str(error)) from None
+
+
 @app.command()
 def dashboard(
     port: int = typer.Option(6060, "--port", "-p", min=1, max=65535, help="Local dashboard port"),
