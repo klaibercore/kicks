@@ -438,6 +438,29 @@ reports private: those contain source paths and the selected hit filenames.
 </details>
 
 <details>
+<summary><strong>Waveform diffusion — an experiment, not a second engine</strong></summary>
+
+An alternative backend generates audio directly: a descriptor-conditioned 1-D
+U-Net denoises a waveform, with no VAE and no vocoder in the path. **It has
+never been trained.** The code, the commands and the tests exist so the
+experiment can be run; no checkpoint, benchmark or listening evidence does, and
+nothing in the API or the studio uses it.
+
+```bash
+uv run kicks diffusion-train -i kick --model-dir models/experiments/diffusion \
+  --run-name "Kick · waveform diffusion baseline" --intent "..." \
+  --hypothesis "..." --success-criteria "..."
+uv run kicks diffusion-generate -i kick -n 8 --steps 50 --target punch=9
+```
+
+Runs land in the same dashboard as VAE runs. `--seed` is the texture seed and
+`--target` pins a slider, so one can be held while the other moves.
+`docs/waveform-diffusion.md` has the design, the decisions behind it and the
+full list of what has not been measured.
+
+</details>
+
+<details>
 <summary><strong>REST API</strong></summary>
 
 Base URL: `http://localhost:8080`. Synthesis requests accept `instrument`.

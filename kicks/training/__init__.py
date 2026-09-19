@@ -1,6 +1,19 @@
-"""Model training: VAE loss and the training loop."""
+"""Model training: VAE loss, the VAE loop and the diffusion loop."""
 
-__all__ = ["multi_resolution_loss", "train", "transient_loss", "vae_loss"]
+__all__ = [
+    "diffusion_loss",
+    "multi_resolution_loss",
+    "train",
+    "train_diffusion",
+    "transient_loss",
+    "vae_loss",
+]
+
+_MODULES = {
+    "train": ".trainer",
+    "diffusion_loss": ".diffusion",
+    "train_diffusion": ".diffusion",
+}
 
 
 def __getattr__(name):
@@ -9,7 +22,7 @@ def __getattr__(name):
     from importlib import import_module
 
     if name in __all__:
-        module = import_module(".trainer" if name == "train" else ".loss", __name__)
+        module = import_module(_MODULES.get(name, ".loss"), __name__)
         value = getattr(module, name)
         globals()[name] = value
         return value

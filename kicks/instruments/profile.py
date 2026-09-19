@@ -328,6 +328,24 @@ class PathSpec:
         return self._model("latent_prior.npz")
 
     @property
+    def diffusion_checkpoint(self) -> str:
+        """Best-validation weights of the waveform diffusion backend (issue #3)."""
+        return self._model("diffusion_best.pth")
+
+    @property
+    def diffusion_control_checkpoint(self) -> str:
+        """Lowest descriptor-target error, which need not be the lowest loss."""
+        return self._model("diffusion_best_control.pth")
+
+    @property
+    def diffusion_final_checkpoint(self) -> str:
+        return self._model("diffusion_checkpoint.pth")
+
+    @property
+    def diffusion_loss_curves(self) -> str:
+        return self._model("diffusion_loss_curves.png")
+
+    @property
     def vocoder_dir(self) -> str:
         """Fine-tuned BigVGAN weights. Shared across candidate model roots.
 

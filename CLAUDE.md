@@ -3,11 +3,12 @@
 ## Scope and source of truth
 
 - Project: profile-driven drum synthesis, VAE training, audio evaluation, a FastAPI backend, a static Next.js studio, and optional Supabase/Stripe accounts.
-- Human setup and product guide: `README.md`. Experiment sequence and research rationale: `docs/high-fidelity-generation.md`.
+- Human setup and product guide: `README.md`. Experiment sequence and research rationale: `docs/high-fidelity-generation.md`. Waveform diffusion backend: `docs/waveform-diffusion.md`.
 - Read current code and `git diff` before changing behavior. Local corpora, checkpoints and active jobs can change independently of Git; inspect them before making claims about the current model.
 - Preserve unrelated work. Do not restart an existing training process to attach telemetry.
 - For files under `web/`, read `web/AGENTS.md` and `web/CLAUDE.md`; consult the installed Next.js docs they specify before editing application code.
 - Implemented: HF/attack loss experiments, residual/latent options, soft log-variance bound, beta schedule controls, tracking, fidelity/listening reports, control audits and promotion records.
+- Implemented but untrained: the descriptor-conditioned waveform diffusion backend (issue #3). Code, CLI and tests exist; no checkpoint, benchmark, listening evidence or API wiring does. Do not describe it as a working alternative to the VAE, and do not compare the two without running the comparison.
 - Not implemented: the proposed codec-latent sequence prior and waveform-loss training through the vocoder. Do not describe them as shipped features.
 
 ## Commands
@@ -25,6 +26,8 @@ uv run kicks serve --griffin-lim              # No neural vocoder download; VAE 
 uv run kicks strip -i kick --dry-run
 uv run kicks clean -i kick                    # Preview; --apply moves rejected files
 uv run kicks generate -i kick -n 20 -k 8
+uv run kicks diffusion-train -i kick --model-dir models/experiments/diffusion
+uv run kicks diffusion-generate -i kick -n 8 --steps 50 --target punch=9
 uv run kicks eval -i kick
 uv run kicks sweep -i kick -n 40              # Requires the API
 uv run kicks cluster -i kick
@@ -150,6 +153,7 @@ Notebook keys: `objective`, `hypothesis`, `success_criteria`, `observations`, `d
 - `train_term_*` / `val_term_*`: unweighted loss components. Compare weighted totals only with matching weights/objective.
 - `active_dims`: per-dimension mean raw KL > 0.01 nats; `raw_kl` is unclamped to free bits. Activity does not establish fidelity.
 - `eval_proxy`: descriptor-distribution mismatch, lower is better; not a perceptual quality rating.
+- Waveform diffusion runs use the same writer and viewer, keyed by `config.backend`. `train_loss` draws noise levels at random with conditioning dropout; `val_loss` holds each hit at a fixed level with fixed noise and full conditioning, so the two are not comparable. `val_loss_{low,mid,high}_sigma` split that error by noise level. `control_mae` is the descriptor-target error of freshly sampled hits in training-set standard deviations — a controllability proxy, measured on a few samples at reduced step count, not a perceptual rating and not a substitute for `scripts/validate_controls.py`. The viewer refuses to treat a VAE run and a diffusion run as a like-for-like comparison.
 - Fidelity waveform errors use a 512-point Hann STFT, hop 128, reference bins above −70 dBFS and profile attack/body windows. Keep them distinct from the live mel KPIs and corpus realism scores.
 
 ## Architecture map
@@ -160,9 +164,11 @@ Notebook keys: `objective`, `hypothesis`, `success_criteria`, `observations`, `d
 | `audio/constants.py` | Shared signal contract |
 | `audio/waveform.py` | NumPy/SciPy loading, envelopes, filters, onsets, STFT; torch-free |
 | `audio/io.py`, `data/dataset.py` | Shared waveform ingestion and `DrumDataset`; same preprocessing for dataset and prior |
+| `data/waveforms.py` | `WaveformDataset`: the same ingestion plus a fixed peak, with descriptor labels measured on the returned waveform |
 | `audio/mel.py`, `audio/vocoder.py` | Fixed mel normalization; DisCoder / BigVGAN / Griffin-Lim adapters |
 | `audio/controls.py`, `audio/effects.py` | Bounded STFT waveform correction, then user effects |
 | `nn/vae.py`, `config.py` | VAE options, device selection (CUDA > MPS > CPU), metadata-aware checkpoint loading |
+| `nn/diffusion.py` | `WaveformUNet`, the angular v-prediction schedule, FiLM/null conditioning and the deterministic `v_sample` |
 | `nn/discoder.py` | Inference port plus upstream `DISCODER_LICENSE`; fine-tuned DAC decoder from `descript-audio-codec` |
 | `analysis/descriptors.py`, `analysis/basis.py` | Descriptor measurements; PCA or closed-loop descriptor solve |
 | `analysis/calibration.py` | Fingerprinted descriptor basis and calibrated slider ranges |
@@ -170,9 +176,11 @@ Notebook keys: `objective`, `hypothesis`, `success_criteria`, `observations`, `d
 | `analysis/fidelity.py` | Matched waveform reports and blind pairs; metric helpers torch-free, rendering imports torch lazily |
 | `analysis/clustering.py`, `analysis/publish.py` | Corpus report, cluster audio, sanitized browser publication |
 | `training/loss.py`, `training/trainer.py` | Base/experimental objectives, baseline, schedules, checkpoint selection |
+| `training/diffusion.py` | v-prediction objective, conditioning dropout, EMA, fixed-level validation and the descriptor-target proxy |
 | `training/tracking.py`, `training/dashboard.html` | Standard-library loopback server, lifecycle, notes, evidence and local charts |
 | `training/promotion.py` | Candidate copy and recorded decision; `PromotionRefused` |
 | `synthesis/generator.py` | Corpus-fitted GMM prior and best-of-k generation |
+| `synthesis/diffusion.py` | Descriptor targets from the checkpoint's own statistics; sampling with separate texture and slider seeds |
 | `corpus/` | Backed-up stripping; quarantine with a manifest |
 | `api/` | FastAPI routes, lazy instrument/backend caches, auth, credits, rate limiting |
 | `cli.py`, `sweep.py` | Lazy command implementations; API control-space sweep |
@@ -193,6 +201,7 @@ Paths in the table are relative to `kicks/`.
 10. Independence is descriptor tracking within calibrated ranges, not guaranteed perceptual independence. Corpus-supported probes govern range calibration; unsupported errors remain reported. Test final audio with axes, corners and random combinations.
 11. Keep `audio/waveform.py`, `analysis/evaluation.py`, fidelity metric imports and the standalone tracking viewer free of eager torch/model imports. Root and training package exports are lazy.
 12. Eval references invalidate on instrument/corpus fingerprint (`--refresh-ref` forces rebuild). Corpus preparation must keep backups/quarantine manifests.
+13. Waveform diffusion keeps its own contract, separate from the VAE's. Preprocessing identity is `peak_safe_lufs_then_peak_0.9_v1` (the shared chain plus a fixed 0.9 peak); labels are measured on the scaled waveform, so conditioning target and generation target agree whatever the descriptor kinds are. Checkpoints carry `model_kind="waveform_diffusion"`, the full `architecture` block and the descriptor keys; `load_diffusion_from_checkpoint()` refuses another kind or another instrument's sliders. Descriptor mean/std come from the training split alone and live in model buffers, so raw profile units go in and out. Resampling factors must be 1 or even and divide the length exactly. Texture seed and slider values stay separately seeded.
 
 ## Vocoder and path configuration
 
@@ -221,7 +230,8 @@ Paths in the table are relative to `kicks/`.
 
 - Documentation: verify options against current `--help`, local links/anchors, artifact names and Markdown/SVG rendering. No training or full app build is needed just to edit prose.
 - Loss/model/schedules/fidelity/promotion: `uv run pytest -q tests/test_high_fidelity.py`; add/run checks covering the changed behavior.
-- Tracking/dashboard: `uv run pytest -q tests/test_training_tracking.py`; inspect desktop/mobile charts, live updates, note preservation and standalone HTML when UI behavior changes.
+- Tracking/dashboard: `uv run pytest -q tests/test_training_tracking.py`; inspect desktop/mobile charts, live updates, note preservation and standalone HTML when UI behavior changes. The viewer serves both backends, so check a VAE run and a diffusion run.
+- Waveform diffusion: `uv run pytest -q tests/test_diffusion.py`. The tests cover the schedule, conditioning, determinism, checkpoints and the tracked loop only; they establish nothing about how the backend sounds.
 - Controls/calibration/vocoders: relevant `tests/test_audio_controls.py` / `tests/test_discoder.py`; use matched waveform/control audits when claiming audio improvement.
 - API/auth/publication: `tests/test_api_auth.py`, `tests/test_publish.py`; full Python regression command is `uv run pytest -q`.
 - Website: from `web/`, `pnpm lint` then `pnpm build`; inspect affected views. Publishing generated analysis is a separate write step, not part of ordinary lint/build checks.

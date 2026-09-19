@@ -11,7 +11,8 @@ from __future__ import annotations
 import torch
 
 from .audio.constants import N_FRAMES, N_MELS
-from .nn import VAE
+from .nn import VAE, WaveformUNet
+from .nn.diffusion import MODEL_KIND as DIFFUSION_KIND
 
 #: Fallback latent size for checkpoints predating shape metadata.
 DEFAULT_LATENT_DIM = 32
@@ -66,6 +67,46 @@ def load_vae_from_checkpoint(
         soft_logvar=bool(architecture.get("soft_logvar", False)),
     )
     model.load_state_dict(state)
+    model.to(device)
+    model.eval()
+    return model, checkpoint
+
+
+def load_diffusion_from_checkpoint(
+    checkpoint_path: str, device: torch.device, profile=None,
+) -> tuple[WaveformUNet, dict]:
+    """Load a waveform diffusion denoiser from its recorded architecture.
+
+    Unlike the VAE loader there is no shape inference to fall back on: this
+    backend is new, so every checkpoint carries its own ``architecture`` block
+    and one that does not is not ours. When a ``profile`` is given, the stored
+    descriptor keys must match it exactly — a checkpoint conditioned on kick
+    sliders would otherwise accept snare values and quietly mean something else.
+    """
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    if checkpoint.get("model_kind") != DIFFUSION_KIND:
+        raise ValueError(
+            f"{checkpoint_path} is not a {DIFFUSION_KIND} checkpoint "
+            f"(model_kind={checkpoint.get('model_kind')!r})",
+        )
+    if profile is not None:
+        expected = [d.key for d in profile.descriptors]
+        stored = list(checkpoint.get("descriptors") or [])
+        if stored and stored != expected:
+            raise ValueError(
+                f"{checkpoint_path} is conditioned on {stored}, "
+                f"but {profile.name} expects {expected}",
+            )
+
+    architecture = dict(checkpoint["architecture"])
+    model = WaveformUNet(
+        n_descriptors=checkpoint["n_descriptors"],
+        length=checkpoint["length"],
+        channels=tuple(architecture.pop("channels")),
+        factors=tuple(architecture.pop("factors")),
+        **architecture,
+    )
+    model.load_state_dict(checkpoint["model"])
     model.to(device)
     model.eval()
     return model, checkpoint
