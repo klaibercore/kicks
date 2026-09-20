@@ -3,11 +3,12 @@
 ## Status
 
 The backend exists as code: a denoiser, a corpus loader, a tracked training
-loop, a deterministic sampler and two commands. **No model has been trained,
-sampled for evaluation, benchmarked against the VAE, or promoted.** Nothing in
-this document reports a measurement. Every number below is a configuration
-value or an arithmetic consequence of one, and the comparisons the experiment
-exists to make have not been run.
+loop, a deterministic sampler and two commands. On 2026-09-20 it was trained
+for the first time, on stratified hi-hat subsets of 64, 256 and 1,000 hits on
+an 8 GB M1; the measurements are under [First runs](#first-runs). **No
+checkpoint has been listened to blind yet, none is served, and there is no
+promotion path.** The sections before *First runs* describe the design and
+its cost; they report configuration values, not results.
 
 This implements the plan in issue #3. The issue's open questions were settled
 as recorded under [Decisions](#decisions-taken); the rest of the plan — training,
@@ -311,6 +312,67 @@ A pinned value outside the bank's range is honoured and warned about. A
 checkpoint without a bank falls back to independent Gaussians, with a warning;
 see [Known issues](#known-issues) for why that is a poor default.
 
+## First runs
+
+Hi-hat, 2026-09-20, Apple M1 8 GB, `--batch-size 2 --grad-accum 4`, seed 42
+subsets from `scripts/make_subset.py`, 10 % validation split of each subset.
+Runs are in the dashboard by these IDs.
+
+| Run | Corpus | Epochs · steps | Val (final) | Low σ | `control_mae` | Wall clock |
+|---|---|---|---|---|---|---|
+| `20260920T094443` smoke | 64 | 2 · 14 | 0.493 | 0.922 | 2.43 sd | 1 min |
+| `20260920T101848` signal check | 256 | 40 · ~1,150 | 0.0166 | 0.035 | 1.49 → 1.05 sd | 54 min |
+| `20260920T113053` + `20260920T124135` | 1,000 | 7 + 43 · ~5,600 | 0.0214 | 0.045 | 0.67 / 0.76 / 0.75 / 0.76 sd | 0.6 h + 3.7 h |
+
+The 1,000-hit run was killed at epoch 8 (its launching session ended) and
+resumed from its epoch-7 `diffusion_best.pth` with a fresh optimizer and a
+restarted 43-epoch cosine at `--learning-rate 1e-4`; the resume's baseline
+validation reproduced the checkpoint's 0.024711 exactly. Validation sets
+differ in size (26 vs 100 hits), so the two final losses are not comparable.
+
+Samples for both trained checkpoints, same texture seed 11 and label seed 5,
+8 hits at 50 steps, scored with `kicks eval` and measured directly:
+
+| | 256-hit run | 1,000-hit run | corpus / VAE prior |
+|---|---|---|---|
+| `kicks eval` mean · pass ≥ 70 | 72.1 · 6/8 | 75.0 · 7/8 | VAE prior `gen_*.wav`: 97.7 · 10/10 |
+| Fréchet distance to corpus | 20.4 | 16.1 | VAE prior: 2.15 |
+| double onsets | 2/8 | 1/8 | corpus 97.8 % single |
+| residual tail floor, RMS 0.8–1.4 s | −39.7 dBFS (−48…−34) | −46.4 dBFS (−49…−39) | vocoder path gates below −70 |
+| crest (median) | 27.2 dB | 26.7 dB | 15.6 dB |
+| attack (median) | 5.7 ms | 17.3 ms | 9.4 ms |
+| descriptor target error, 7 of 8 | 0.25–2.8 sd | 0.10–0.7 sd | — |
+| short-decay targets (9–15 ms), measured | 335–650 ms | 34–123 ms | — |
+
+Read: every measured axis moved the right way with ~5× the optimizer steps,
+and the sliders now land, but the hits are still far off the corpus — the
+hit decays properly for ~400 ms and then sits on a residual noise floor some
+25 dB above where the vocoder path gates to silence, and the body is thin.
+Listening on the 256-hit set (one listener, not blind): clear transient,
+recognisable sizzle, a good amount of noise overall. Blind listening on the
+1,000-hit set is pending in the dashboard's Listening lab, report
+`hihat-diffusion-1000-ab`, made by:
+
+```bash
+uv run python scripts/diffusion_listening.py --instrument hihat \
+  --checkpoint models/experiments/diffusion-hihat-1000-b/hihat/diffusion_best.pth \
+  --run 20260920T124135 --out output/fidelity/hihat-diffusion-1000-ab
+```
+
+It samples with the same seeds, pairs each hit with the corpus hit whose
+descriptors it was asked for (targets come from label-bank rows, so seven of
+eight resolve to their exact source file), level-matches with the fidelity
+module's shared anti-clip gain, and writes whole-hit and 2 kHz+ pairs with a
+key. The report uses the fidelity layout and is attached to the run as
+`kind="fidelity"`, but `held_out` is false, `method` is
+`diffusion_generation_ab_v1` and there is no reconstruction: it is a
+generation A/B, not a fidelity report.
+
+Open question for the next step: whether the floor and the thin body keep
+moving with more steps (the 48 h full-corpus resume) or need a sampler or
+objective change — a final denoise/clamp step, or a tail-silence term.
+Nothing beyond this runs without a decision recorded in the notebook.
+
 ## Decisions taken
 
 Issue #3 lists decisions to settle before implementation. These were settled as
@@ -327,19 +389,20 @@ follows.
 
 ## What has not been done
 
-Everything the issue asks for after implementation:
+Of what the issue asks for after implementation:
 
-- No training run of any length. No checkpoint exists.
-- No sound-quality, HF, attack or late-energy comparison against the VAE backend.
-- No generation-diversity measurement, no descriptor target error on a trained
-  model, no cross-talk measurement.
-- No axis, corner or random-combination sweep; no level-matched blind listening.
-- No rendering-latency benchmark, so no claim about interactive use. At 50 steps
-  the denoiser runs 50 times per hit, doubled under guidance; whether that is
-  fast enough for a slider release is unmeasured.
-- No CUDA performance figures, and no throughput figure from a real epoch. The
-  MPS step-time and memory probe above used random data on an untrained
-  network; training itself has not run on any device.
+- No full-corpus run; the trained checkpoints saw 256 and 1,000 hi-hat hits.
+  No snare or kick run of any length.
+- No blind listening verdicts yet; the 1,000-hit pairs are prepared, unjudged.
+- No matched HF / attack / late-energy comparison against the VAE backend's
+  rendered audio; the only cross-backend figures are `kicks eval` set scores.
+- No generation-diversity measurement and no cross-talk measurement; the
+  descriptor target error exists only as the in-loop proxy and the
+  `diffusion-generate` print-out.
+- No axis, corner or random-combination sweep.
+- No rendering-latency benchmark beyond the M1 sampling times above (6.4 s per
+  hit at 50 steps), so no claim about interactive use.
+- No CUDA figures. Real-epoch throughput on the M1 is ~0.32–0.38 s per hit.
 - Splits are fingerprinted the same way the VAE's are, with the same limitation:
   the fingerprint covers paths, sizes and mtimes, not content, so it does not
   detect near-duplicates or pack leakage. The issue asks for splits by

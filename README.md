@@ -492,12 +492,16 @@ default batch of 8 exceeds the MPS working set and runs about 8× slower per
 sample. Measured on an M1, one epoch costs roughly 27 min for hi-hats, 38 min
 for snares and 48 min for kicks, and one 50-step sample takes about 6 s, so
 train on stratified subsets from `scripts/make_subset.py` — a 256-hit hour,
-then a 2,000-hit night — before a full corpus, hi-hat first. Generation
+then a 1,000-hit afternoon — before a full corpus, hi-hat first. Generation
 targets are resampled from the checkpoint's own training rows, so a default
-`diffusion-generate` asks for combinations real hits had.
+`diffusion-generate` asks for combinations real hits had, and
+`scripts/diffusion_listening.py` turns a checkpoint into blind A/B pairs
+against the matching corpus hits for the dashboard's Listening lab. The first
+hi-hat runs (September 2026) produce recognisable transients and sizzle over a
+residual noise floor; they are documented, unlistened blind, and not served.
 [`docs/waveform-diffusion.md`](docs/waveform-diffusion.md) has the design, the
-measurements, the budget table, the run sequence and the full list of what has
-not been measured.
+measurements, the budget table, the run results and the list of what has not
+been measured.
 
 </details>
 
