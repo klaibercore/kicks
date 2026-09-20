@@ -193,7 +193,10 @@ environment settings still take precedence.
 
 The dashboard refreshes every three seconds and includes **exact-value hover,
 optional smoothing, epoch ranges, two-run comparisons, JSON export and editable
-notes**. Its Evidence card collects fidelity, controls and promotion reports.
+notes**. Its Evidence tab collects fidelity, controls and promotion reports, and
+its **Listening lab** plays the blind A/B pairs of any fidelity report — whole
+hit or 2 kHz+ band, with waveform and spectrogram views — and saves your
+verdicts next to the report so the tally survives a reload.
 
 | Signal | What it tells you |
 |:---|:---|
@@ -313,10 +316,12 @@ reconstruction through the vocoder**. It measures level-matched 2–8 kHz and
 8–16 kHz attack/body error, onset timing, envelope, flatness and late energy.
 Fresh prior samples get corpus-referenced realism scores as well.
 
-Open `output/audits/hf-detail/listening/listening.html` for randomized,
-level-matched **whole-hit and 2 kHz+ A/B pairs**. Record the listening tally and
-findings in the notebook; the tally page does not save them automatically.
-The full report is `report.json`, and its summary attaches to the run.
+Listen to the randomized, level-matched **whole-hit and 2 kHz+ A/B pairs** in
+the dashboard's Listening lab, which finds every `output/fidelity/*` report and
+every fidelity report attached to a run; verdicts are saved to
+`listening/verdicts.json` and can be copied into Observations. The standalone
+`listening/listening.html` page still works but saves nothing. The full report
+is `report.json`, and its summary attaches to the run.
 
 <details>
 <summary><strong>Which samples are held out? New runs and older checkpoints</strong></summary>

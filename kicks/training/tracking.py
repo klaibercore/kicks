@@ -20,6 +20,14 @@ from urllib.parse import unquote, urlsplit
 NOTE_FIELDS = ("objective", "hypothesis", "success_criteria", "observations", "decision")
 TEMPLATE = Path(__file__).with_name("dashboard.html")
 
+#: Fidelity report subdirectories the dashboard may stream audio from.
+FIDELITY_AUDIO_DIRS = ("listening", "reconstruction", "generation")
+REPORT_SLUG = re.compile(r"^[A-Za-z0-9_-]+$")
+AUDIO_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.wav$")
+VERDICT_CHOICES = ("a", "b", "tie", "reject")
+VERDICT_BANDS = ("full", "hf")
+MAX_AUDIO_BYTES = 256 * 1024 * 1024
+
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -92,6 +100,102 @@ def attach_report(directory: Path, kind: str, path, summary: dict, note: str = "
     atomic_write(directory / "reports.json", json.dumps(reports, indent=2))
     _write_sibling_script(directory, "reports", "receiveTrainingReports", reports)
     return entry
+
+
+def fidelity_dirs(root: Path) -> dict:
+    """Discover fidelity report directories: ``slug -> dir`` for the listening lab.
+
+    Two sources, both explicit: the conventional ``<output>/fidelity/*/report.json``
+    next to the runs root, and every ``fidelity`` report attached to a run (even one
+    rendered to a custom ``--out``). Missing directories are skipped; a directory only
+    qualifies when its ``report.json`` parses and names an instrument.
+    """
+    root = Path(root).resolve()
+    found: dict[str, Path] = {}
+
+    def add(directory: Path):
+        try:
+            directory = directory.resolve()
+            report = json.loads((directory / "report.json").read_text())
+            if not isinstance(report, dict) or not report.get("instrument"):
+                return
+        except (OSError, ValueError):
+            return
+        slug = directory.name
+        if not REPORT_SLUG.fullmatch(slug):
+            return
+        if slug in found and found[slug] != directory:
+            slug = f"{directory.name}-{hashlib.sha256(str(directory).encode()).hexdigest()[:6]}"
+        found[slug] = directory
+
+    sibling = root.parent / "fidelity"
+    if sibling.is_dir():
+        for child in sorted(sibling.iterdir()):
+            if child.is_dir():
+                add(child)
+    if root.is_dir():
+        for run_dir in sorted(root.iterdir()):
+            if not (run_dir / "run.json").is_file():
+                continue
+            for entry in read_reports(run_dir):
+                if entry.get("kind") != "fidelity" or not entry.get("path"):
+                    continue
+                path = Path(entry["path"])
+                add(path.parent if path.name == "report.json" else path)
+    return found
+
+
+def read_fidelity(directory: Path) -> dict:
+    """Report metadata for the listening lab; audio stays on disk until requested."""
+    report = json.loads((directory / "report.json").read_text())
+    return {"slug": directory.name, "directory": str(directory), "report": report}
+
+
+def read_verdicts(directory: Path) -> dict:
+    try:
+        verdicts = json.loads((directory / "listening" / "verdicts.json").read_text())
+        return verdicts if isinstance(verdicts, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_verdicts(directory: Path, verdicts: dict):
+    atomic_write(directory / "listening" / "verdicts.json", json.dumps(verdicts, indent=2))
+
+
+def fidelity_summary(report: dict, directory: Path) -> dict:
+    """Compact row for the report picker; no corpus filenames, no blind key."""
+    summary = report.get("summary") or {}
+    key_path = directory / "listening" / "key.json"
+    try:
+        pairs = len(json.loads(key_path.read_text())) if key_path.is_file() else 0
+    except (OSError, ValueError):
+        pairs = 0
+    verdicts = read_verdicts(directory)
+    judged = sum(1 for entry in verdicts.values()
+                 if isinstance(entry, dict) and any(entry.get(band) for band in VERDICT_BANDS))
+    return {
+        "slug": directory.name,
+        "instrument": report.get("instrument"),
+        "created_at": report.get("created_at"),
+        "run_id": report.get("run_id"),
+        "held_out": report.get("held_out"),
+        "hit_origin": report.get("hit_origin"),
+        "vocoder": report.get("vocoder"),
+        "checkpoint": Path(report["checkpoint"]).name if report.get("checkpoint") else None,
+        "epoch": report.get("epoch"),
+        "val_loss": report.get("val_loss"),
+        "pairs": pairs,
+        "generations": len(report.get("generation") or []),
+        "reconstructions": len([s for s in report.get("samples") or [] if isinstance(s, dict)]),
+        "judged": judged,
+        "summary": {key: summary.get(key) for key in
+                    ("samples", "mel_mae_db", "vae_8_16k_body_mae_db", "vae_2_8k_body_mae_db",
+                     "vocoder_8_16k_body_mae_db", "vae_penalty_8_16k_body_db",
+                     "vae_onset_error_ms", "vae_envelope_mae_db", "vae_late_excess_db",
+                     "generation_mean_score", "generation_pass_rate", "seconds")
+                    if summary.get(key) is not None},
+    }
 
 
 def find_run(root: Path, run_id: str) -> Path:
@@ -240,6 +344,15 @@ def dashboard_server(root: Path, port=6060) -> ThreadingHTTPServer:
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
 
+    def reports_dir(slug: str):
+        """Resolve a listening-lab slug to a discovered, qualified report directory."""
+        if not REPORT_SLUG.fullmatch(slug):
+            raise ValueError("Invalid report id")
+        found = fidelity_dirs(root)
+        if slug not in found:
+            raise FileNotFoundError(slug)
+        return found[slug]
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
             pass
@@ -270,6 +383,41 @@ def dashboard_server(root: Path, port=6060) -> ThreadingHTTPServer:
             try:
                 if parts == [""] or parts == ["index.html"]:
                     return self.reply(200, TEMPLATE.read_text(), "text/html")
+                if parts == ["api", "capabilities"]:
+                    return self.reply(200, {"viewer": 2, "listening": True, "instruments": True})
+                if parts == ["api", "fidelity"]:
+                    rows = [fidelity_summary(read_fidelity(directory)["report"], directory)
+                            for directory in fidelity_dirs(root).values()]
+                    rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+                    return self.reply(200, {"reports": rows})
+                if len(parts) == 4 and parts[:2] == ["api", "fidelity"] and parts[3] == "key":
+                    directory = reports_dir(parts[2])
+                    key = json.loads((directory / "listening" / "key.json").read_text())
+                    return self.reply(200, {"key": key})
+                if len(parts) == 3 and parts[:2] == ["api", "fidelity"]:
+                    directory = reports_dir(parts[2])
+                    data = read_fidelity(directory)
+                    report = data["report"]
+                    key_path = directory / "listening" / "key.json"
+                    try:
+                        pairs = json.loads(key_path.read_text()) if key_path.is_file() else []
+                    except (OSError, ValueError):
+                        pairs = []
+                    for pair in pairs:  # Blind until the listener reveals: strip the assignment.
+                        pair.pop("a_is", None)
+                        pair.pop("b_is", None)
+                    return self.reply(200, {
+                        "slug": data["slug"], "instrument": report.get("instrument"),
+                        "created_at": report.get("created_at"), "run_id": report.get("run_id"),
+                        "held_out": report.get("held_out"), "hit_origin": report.get("hit_origin"),
+                        "vocoder": report.get("vocoder"), "epoch": report.get("epoch"),
+                        "val_loss": report.get("val_loss"), "method": report.get("method"),
+                        "windows": report.get("windows"), "summary": report.get("summary"),
+                        "samples": report.get("samples"), "generation": report.get("generation"),
+                        "pairs": pairs, "verdicts": read_verdicts(directory),
+                    })
+                if len(parts) == 5 and parts[:2] == ["api", "fidelity"] and parts[3] == "audio":
+                    return self.audio(parts[2], parts[4])
                 if parts == ["api", "runs"]:
                     records = []
                     for directory in root.iterdir():
@@ -286,8 +434,40 @@ def dashboard_server(root: Path, port=6060) -> ThreadingHTTPServer:
             except (OSError, ValueError):
                 self.reply(404, {"error": "Run not found"})
 
+        def audio(self, slug: str, name: str):
+            """Stream one allow-listed WAV from a known report's audio directories."""
+            if not AUDIO_NAME.fullmatch(name):
+                return self.reply(404, {"error": "Not found"})
+            try:
+                directory = reports_dir(slug)
+            except (OSError, ValueError):
+                return self.reply(404, {"error": "Report not found"})
+            for sub in FIDELITY_AUDIO_DIRS:
+                candidate = (directory / sub / name).resolve()
+                try:
+                    candidate.relative_to((directory / sub).resolve())
+                except ValueError:
+                    continue
+                if candidate.is_file():
+                    size = candidate.stat().st_size
+                    if size > MAX_AUDIO_BYTES:
+                        return self.reply(413, {"error": "Audio too large"})
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/wav")
+                    self.send_header("Content-Length", str(size))
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.end_headers()
+                    with candidate.open("rb") as handle:
+                        while chunk := handle.read(1 << 20):
+                            self.wfile.write(chunk)
+                    return
+            self.reply(404, {"error": "Audio not found"})
+
         def do_POST(self):
             parts = self.route()
+            if len(parts) == 4 and parts[:2] == ["api", "fidelity"] and parts[3] == "verdicts":
+                return self.verdicts(parts[2])
             if len(parts) != 4 or parts[:2] != ["api", "runs"] or parts[3] != "notes":
                 return self.reply(404, {"error": "Not found"})
             if self.headers.get_content_type() != "application/json":
@@ -306,6 +486,40 @@ def dashboard_server(root: Path, port=6060) -> ThreadingHTTPServer:
                 self.reply(200, {"notes": notes})
             except FileNotFoundError:
                 self.reply(404, {"error": "Run not found"})
+            except (ValueError, OSError) as exc:
+                self.reply(400, {"error": str(exc)})
+
+        def verdicts(self, slug: str):
+            """Merge blind-listening verdicts into the report's ``verdicts.json``."""
+            if self.headers.get_content_type() != "application/json":
+                return self.reply(415, {"error": "Use application/json"})
+            try:
+                directory = reports_dir(slug)
+            except (OSError, ValueError):
+                return self.reply(404, {"error": "Report not found"})
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                if not 0 < length <= 65536:
+                    return self.reply(413, {"error": "Verdicts must be at most 64 KB"})
+                values = json.loads(self.rfile.read(length))
+                if not isinstance(values, dict) or "pair" not in values or "band" not in values:
+                    raise ValueError("Expected {pair, band, choice}")
+                if values["band"] not in VERDICT_BANDS:
+                    raise ValueError(f"band must be one of {VERDICT_BANDS}")
+                choice = values.get("choice")
+                if choice is not None and choice not in VERDICT_CHOICES:
+                    raise ValueError(f"choice must be one of {VERDICT_CHOICES} or null")
+                pair = str(int(values["pair"]))
+                verdicts = read_verdicts(directory)
+                entry = verdicts.setdefault(pair, {})
+                if choice is None:
+                    entry.pop(values["band"], None)
+                    if not entry:
+                        verdicts.pop(pair, None)
+                else:
+                    entry[values["band"]] = {"choice": choice, "at": now()}
+                write_verdicts(directory, verdicts)
+                self.reply(200, {"verdicts": verdicts})
             except (ValueError, OSError) as exc:
                 self.reply(400, {"error": str(exc)})
 

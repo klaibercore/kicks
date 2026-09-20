@@ -147,6 +147,11 @@ Default root: `<KICKS_OUTPUT_DIR>/training` (normally `output/training`). Overri
 | `GET /api/runs` | List run summaries |
 | `GET /api/runs/<id>` | Full run, notebook and evidence |
 | `POST /api/runs/<id>/notes` | Partial JSON update of string-valued notebook fields |
+| `GET /api/capabilities` | Viewer version and feature flags; the template degrades to charts-only against an older server |
+| `GET /api/fidelity`, `GET /api/fidelity/<slug>` | Listening-lab reports: `<output>/fidelity/*/report.json` plus every `fidelity` report attached to a run; the detail strips the blind key's `a_is`/`b_is` |
+| `GET /api/fidelity/<slug>/key` | The blind assignment, only when the listener reveals it |
+| `GET /api/fidelity/<slug>/audio/<name>` | One WAV from that report's `listening/`, `reconstruction/` or `generation/` directory only; name allow-listed, path-traversal refused, 256 MB cap |
+| `POST /api/fidelity/<slug>/verdicts` | `{pair, band: full\|hf, choice: a\|b\|tie\|reject\|null}` merged into `listening/verdicts.json`, 64 KB cap |
 
 Notebook keys: `objective`, `hypothesis`, `success_criteria`, `observations`, `decision`. Initial CLI prose maps `--intent` to `objective`. `attach_report()` is the Python evidence API; `find_run()` accepts a full ID or unique prefix. The HTTP API uses full IDs.
 
@@ -234,7 +239,7 @@ Paths in the table are relative to `kicks/`.
 
 - Documentation: verify options against current `--help`, local links/anchors, artifact names and Markdown/SVG rendering. No training or full app build is needed just to edit prose.
 - Loss/model/schedules/fidelity/promotion: `uv run pytest -q tests/test_high_fidelity.py`; add/run checks covering the changed behavior.
-- Tracking/dashboard: `uv run pytest -q tests/test_training_tracking.py`; inspect desktop/mobile charts, live updates, note preservation and standalone HTML when UI behavior changes. The viewer serves both backends, so check a VAE run and a diffusion run.
+- Tracking/dashboard: `uv run pytest -q tests/test_training_tracking.py`; inspect desktop/mobile charts, live updates, note preservation and standalone HTML when UI behavior changes. The viewer serves both backends, so check a VAE run and a diffusion run, plus the Listening lab against a real `output/fidelity/*` report. The template is read per request, so HTML edits are live at once; server-side changes in `tracking.py` need the viewer restarted (the training process is separate and keeps its own copy). Fidelity detail responses include corpus sample paths — the viewer is loopback-only and never a publication path.
 - Waveform diffusion: `uv run pytest -q tests/test_diffusion.py tests/test_make_subset.py`. The tests cover the schedule, conditioning, target drawing, determinism, checkpoints, the tracked loop and subset building only; they establish nothing about how the backend sounds.
 - Controls/calibration/vocoders: relevant `tests/test_audio_controls.py` / `tests/test_discoder.py`; use matched waveform/control audits when claiming audio improvement. For snare/hi-hat identity changes, rerun `scripts/validate_controls.py --control identity --texture-seeds ...` and `scripts/compare_identity.py`, and report multi-onset counts and target errors separately for centre, axis and random probes.
 - API/auth/publication: `tests/test_api_auth.py`, `tests/test_publish.py`; full Python regression command is `uv run pytest -q`.

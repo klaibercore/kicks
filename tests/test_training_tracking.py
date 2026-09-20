@@ -152,3 +152,117 @@ def test_dashboard_notes_are_safe_and_survive_concurrent_metric_updates(tmp_path
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def _wav(path, samples: int = 64):
+    import struct
+    import wave
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(44100)
+        handle.writeframes(struct.pack(f"<{samples}h", *([0] * samples)))
+    return path
+
+
+def _fidelity_report(directory, instrument="kick", pairs=1):
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "report.json").write_text(json.dumps({
+        "instrument": instrument, "checkpoint": "/models/vae_best.pth", "epoch": 3,
+        "held_out": True, "summary": {"mel_mae_db": 1.5},
+        "samples": [{"path": "data/kicks/secret_name.wav"}],
+    }))
+    key = []
+    for index in range(1, pairs + 1):
+        names = {side: f"pair_{index:02d}_{side}.wav" for side in "AB"}
+        for name in names.values():
+            _wav(directory / "listening" / name)
+        key.append({"pair": index, "a_is": "vae", "b_is": "reference",
+                    "a": names["A"], "b": names["B"]})
+    (directory / "listening" / "key.json").write_text(json.dumps(key))
+    return directory
+
+
+def test_listening_lab_serves_reports_allow_listed_audio_and_records_verdicts(tmp_path):
+    from kicks.training.tracking import attach_report
+
+    runs = tmp_path / "training"
+    sibling = _fidelity_report(tmp_path / "fidelity" / "demo", pairs=2)
+    elsewhere = _fidelity_report(tmp_path / "audits" / "custom-out", instrument="snare")
+    _wav(tmp_path / "outside.wav")
+    (tmp_path / "fidelity" / "broken").mkdir(parents=True)
+    (tmp_path / "fidelity" / "broken" / "report.json").write_text("not json")
+
+    run = TrainingRun(runs, {"instrument": "snare", "epochs": 1})
+    attach_report(run.directory, "fidelity", elsewhere / "report.json", {"mel_mae_db": 2.0})
+
+    server = dashboard_server(runs, 0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    def get(path):
+        with urlopen(base + path) as response:
+            return json.load(response)
+
+    def post(path, payload, content_type="application/json"):
+        request = Request(base + path, data=json.dumps(payload).encode(),
+                          headers={"Content-Type": content_type})
+        with urlopen(request) as response:
+            return json.load(response)
+
+    try:
+        assert get("/api/capabilities")["listening"] is True
+        # Both discovery sources appear; the unparsable directory does not.
+        reports = {entry["slug"]: entry for entry in get("/api/fidelity")["reports"]}
+        assert set(reports) == {"demo", "custom-out"}
+        assert reports["demo"]["pairs"] == 2 and reports["demo"]["judged"] == 0
+        assert reports["custom-out"]["instrument"] == "snare"
+        assert reports["demo"]["checkpoint"] == "vae_best.pth"
+
+        # The blind key stays blind until asked for explicitly.
+        detail = get("/api/fidelity/demo")
+        assert [pair["a"] for pair in detail["pairs"]] == ["pair_01_A.wav", "pair_02_A.wav"]
+        assert all("a_is" not in pair for pair in detail["pairs"])
+        assert get("/api/fidelity/demo/key")["key"][0]["a_is"] == "vae"
+
+        # Audio: only names inside the report's listening/reconstruction/generation dirs.
+        with urlopen(base + "/api/fidelity/demo/audio/pair_01_A.wav") as response:
+            assert response.headers["Content-Type"] == "audio/wav"
+            assert len(response.read()) == (sibling / "listening" / "pair_01_A.wav").stat().st_size
+        for bad in ("/api/fidelity/demo/audio/..%2F..%2Foutside.wav",
+                    "/api/fidelity/demo/audio/missing.wav",
+                    "/api/fidelity/demo/audio/report.json",
+                    "/api/fidelity/nope/audio/pair_01_A.wav",
+                    "/api/fidelity/%2e%2e"):
+            with pytest.raises(HTTPError) as error:
+                urlopen(base + bad)
+            assert error.value.code == 404, bad
+
+        # Verdicts persist next to the key, merge per pair and band, and clear on null.
+        assert post("/api/fidelity/demo/verdicts", {"pair": 1, "band": "full", "choice": "a"})[
+            "verdicts"]["1"]["full"]["choice"] == "a"
+        post("/api/fidelity/demo/verdicts", {"pair": 1, "band": "hf", "choice": "tie"})
+        saved = json.loads((sibling / "listening" / "verdicts.json").read_text())
+        assert set(saved["1"]) == {"full", "hf"}
+        assert {e["slug"]: e["judged"] for e in get("/api/fidelity")["reports"]}["demo"] == 1
+        post("/api/fidelity/demo/verdicts", {"pair": 1, "band": "full", "choice": None})
+        post("/api/fidelity/demo/verdicts", {"pair": 1, "band": "hf", "choice": None})
+        assert json.loads((sibling / "listening" / "verdicts.json").read_text()) == {}
+
+        for payload, code in (({"pair": 1, "band": "mid", "choice": "a"}, 400),
+                              ({"pair": 1, "band": "full", "choice": "maybe"}, 400),
+                              ({"pair": "x", "band": "full", "choice": "a"}, 400)):
+            with pytest.raises(HTTPError) as error:
+                post("/api/fidelity/demo/verdicts", payload)
+            assert error.value.code == code, payload
+        with pytest.raises(HTTPError) as error:
+            post("/api/fidelity/demo/verdicts", {"pair": 1, "band": "full", "choice": "a"},
+                 content_type="text/plain")
+        assert error.value.code == 415
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
