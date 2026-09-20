@@ -295,8 +295,11 @@ encourages continuity between neighbouring slider values but does not guarantee
 that the rest of the hit holds still — that is what a control audit measures.
 
 Each sample prints its achieved descriptor values against its targets and its
-raw peak. A sample is scaled down only if it would clip on write, so a model
-whose output level drifts off the corpus stays visible.
+raw peak. Achieved values, like `control_mae` during training, are measured
+on the sample peak-normalised to the training labels' 0.9 — the level the
+labels were measured at and the range the mel path expects. The file itself
+is scaled down only if it would clip on write, so a model whose output level
+drifts off the corpus stays visible in the printed peak.
 
 Targets come from the checkpoint's label bank — the training split's
 descriptor rows. Unpinned descriptors are resampled from those rows, so every

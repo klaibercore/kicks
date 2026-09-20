@@ -38,7 +38,7 @@ from rich.progress import (
 )
 from torch.utils.data import DataLoader, random_split
 
-from ..data.waveforms import PREPROCESSING, label_waveform
+from ..data.waveforms import PREPROCESSING, label_waveform, peak_normalize
 from ..instruments import InstrumentProfile
 from ..nn.diffusion import diffuse, v_sample, v_target
 from .tracking import TrainingRun, runs_root, split_fingerprint
@@ -321,7 +321,10 @@ def train_diffusion(
         errors = []
         scale = model.label_std.detach().cpu().numpy()
         for row, target in zip(audio, targets.numpy()):
-            measured = label_waveform(row, profile)
+            # Training labels were measured at the dataset's fixed peak, and the
+            # mel path expects audio inside [-1, 1]; measure the sample the same
+            # way rather than at whatever level the sampler happened to land on.
+            measured = label_waveform(peak_normalize(row), profile)
             errors.append(np.abs(measured - target) / np.maximum(scale, 1e-6))
         value = float(np.mean(errors))
         return value if math.isfinite(value) else None

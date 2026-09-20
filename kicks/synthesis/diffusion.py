@@ -33,7 +33,7 @@ import torch
 
 from ..audio.constants import SAMPLE_RATE
 from ..config import get_device, load_diffusion_from_checkpoint
-from ..data.waveforms import TARGET_PEAK, label_waveform
+from ..data.waveforms import TARGET_PEAK, label_waveform, peak_normalize
 from ..instruments import InstrumentProfile, get_profile
 from ..nn.diffusion import v_sample
 
@@ -144,7 +144,13 @@ def generate_diffusion(
     unconditional: bool = False,
     prefix: str = "diff",
 ) -> list[str]:
-    """Sample one-shots from a trained denoiser and report their slider error."""
+    """Sample one-shots from a trained denoiser and report their slider error.
+
+    Achieved descriptor values are measured on the sample peak-normalised to
+    the training labels' level, so they compare with the targets; the file is
+    only rescaled if it would clip, so the printed raw peak still shows level
+    drift.
+    """
     import soundfile as sf
 
     if count < 1:
@@ -181,7 +187,8 @@ def generate_diffusion(
         sf.write(path, audio.numpy().astype(np.float32), SAMPLE_RATE, subtype="PCM_24")
         paths.append(path)
 
-        measured = label_waveform(audio.unsqueeze(0), profile)
+        # Measured at the training labels' peak, whatever level was written.
+        measured = label_waveform(peak_normalize(audio.unsqueeze(0)), profile)
         if labels is None:
             print(f"  {path}: peak {peak:.3f}  "
                   + "  ".join(f"{k}={v:.3g}" for k, v in zip(keys, measured)))
