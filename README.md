@@ -196,7 +196,9 @@ optional smoothing, epoch ranges, two-run comparisons, JSON export and editable
 notes**. Its Evidence tab collects fidelity, controls and promotion reports, and
 its **Listening lab** plays the blind A/B pairs of any fidelity report — whole
 hit or 2 kHz+ band, with waveform and spectrogram views — and saves your
-verdicts next to the report so the tally survives a reload.
+verdicts next to the report so the tally survives a reload. It follows the
+system colour scheme, with a light/dark switch in the sidebar; colour is
+reserved for data series and instruments, everything else is ink.
 
 | Signal | What it tells you |
 |:---|:---|
