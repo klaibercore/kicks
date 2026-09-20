@@ -8,7 +8,7 @@
 - Preserve unrelated work. Do not restart an existing training process to attach telemetry.
 - For files under `web/`, read `web/AGENTS.md` and `web/CLAUDE.md`; consult the installed Next.js docs they specify before editing application code.
 - Implemented: HF/attack loss experiments, residual/latent options, soft log-variance bound, beta schedule controls, tracking, fidelity/listening reports, control audits and promotion records.
-- Implemented but untrained: the descriptor-conditioned waveform diffusion backend (issue #3), merged 2026-09-19. Code, CLI and tests exist; no checkpoint, listening evidence or API wiring does. Do not describe it as a working alternative to the VAE, and do not compare the two without running the comparison. Two known, unfixed defects are recorded in `docs/waveform-diffusion.md`: `draw_labels()` samples targets off the corpus distribution (about 29% of snare draws request a negative decay), and the trailing gradient-accumulation group is under-weighted. Fix the first before collecting any control evidence with `diffusion-generate`.
+- Implemented but untrained: the descriptor-conditioned waveform diffusion backend (issue #3), merged 2026-09-19. Code, CLI and tests exist; no checkpoint, listening evidence or API wiring does. Do not describe it as a working alternative to the VAE, and do not compare the two without running the comparison. On this 8 GB Apple Silicon machine train on stratified subsets (`scripts/make_subset.py`) with `--batch-size 2 --grad-accum 4`; `docs/waveform-diffusion.md` has the measured budget table. Training phases wait for the user's go, each preceded by a summary of the previous phase.
 - Not implemented: the proposed codec-latent sequence prior and waveform-loss training through the vocoder. Do not describe them as shipped features.
 
 ## Commands
@@ -26,8 +26,10 @@ uv run kicks serve --griffin-lim              # No neural vocoder download; VAE 
 uv run kicks strip -i kick --dry-run
 uv run kicks clean -i kick                    # Preview; --apply moves rejected files
 uv run kicks generate -i kick -n 20 -k 8
-uv run kicks diffusion-train -i hihat --model-dir models/experiments/diffusion \
-  --batch-size 2 --grad-accum 16           # 8 GB Apple Silicon; the default batch of 8 thrashes MPS
+uv run python scripts/make_subset.py --instrument hihat --size 2000 --seed 42   # stratified, nested subsets
+uv run kicks diffusion-train -i hihat --data data/_subsets/hihat-2000 \
+  --model-dir models/experiments/diffusion \
+  --batch-size 2 --grad-accum 4            # 8 GB Apple Silicon; the default batch of 8 thrashes MPS
 uv run kicks diffusion-generate -i hihat -n 8 --steps 50 --target decay=40
 uv run kicks eval -i kick
 uv run kicks sweep -i kick -n 40              # Requires the API
@@ -182,7 +184,7 @@ Notebook keys: `objective`, `hypothesis`, `success_criteria`, `observations`, `d
 | `training/promotion.py` | Candidate copy and recorded decision; `PromotionRefused` |
 | `synthesis/generator.py` | Corpus-fitted GMM prior and best-of-k generation |
 | `synthesis/identity.py`, `synthesis/controlled.py` | Corpus-anchored `IdentityBasis` (radius 4, ±6 dB correction cap, `.identity.npz` cache) and the single rendering path shared by studio previews, exports and the control audit |
-| `synthesis/diffusion.py` | Descriptor targets from the checkpoint's own statistics; sampling with separate texture and slider seeds |
+| `synthesis/diffusion.py` | Descriptor targets resampled from the checkpoint's label bank (nearest rows when pinned); sampling with separate texture and slider seeds |
 | `corpus/` | Backed-up stripping; quarantine with a manifest |
 | `api/` | FastAPI routes, lazy instrument/backend caches, auth, credits, rate limiting |
 | `cli.py`, `sweep.py` | Lazy command implementations; API control-space sweep |
@@ -203,7 +205,7 @@ Paths in the table are relative to `kicks/`.
 10. Independence is descriptor tracking within calibrated ranges, not guaranteed perceptual independence. Corpus-supported probes govern range calibration; unsupported errors remain reported. Test final audio with axes, corners and random combinations. Profiles with `identity_controls=True` (snare, hi-hat) anchor the texture to a corpus encoding, centre sliders on corpus medians and cap waveform correction; extreme snare combinations stay coupled by design, and the studio reports limited reach instead of forcing the numbers (`docs/audio-identity-plan.md`).
 11. Keep `audio/waveform.py`, `analysis/evaluation.py`, fidelity metric imports and the standalone tracking viewer free of eager torch/model imports. Root and training package exports are lazy.
 12. Eval references invalidate on instrument/corpus fingerprint (`--refresh-ref` forces rebuild). Corpus preparation must keep backups/quarantine manifests.
-13. Waveform diffusion keeps its own contract, separate from the VAE's. Preprocessing identity is `peak_safe_lufs_then_peak_0.9_v1` (the shared chain plus a fixed 0.9 peak); labels are measured on the scaled waveform, so conditioning target and generation target agree whatever the descriptor kinds are. Checkpoints carry `model_kind="waveform_diffusion"`, the full `architecture` block and the descriptor keys; `load_diffusion_from_checkpoint()` refuses another kind or another instrument's sliders. Descriptor mean/std come from the training split alone and live in model buffers, so raw profile units go in and out. Resampling factors must be 1 or even and divide the length exactly. Texture seed and slider values stay separately seeded.
+13. Waveform diffusion keeps its own contract, separate from the VAE's. Preprocessing identity is `peak_safe_lufs_then_peak_0.9_v1` (the shared chain plus a fixed 0.9 peak); labels are measured on the scaled waveform, so conditioning target and generation target agree whatever the descriptor kinds are. Checkpoints carry `model_kind="waveform_diffusion"`, the full `architecture` block and the descriptor keys; `load_diffusion_from_checkpoint()` refuses another kind or another instrument's sliders. Descriptor mean/std come from the training split alone and live in model buffers, so raw profile units go in and out; the split's descriptor rows travel beside the weights as `label_bank` and are rebuilt on `--resume`, and `draw_labels()` resamples them rather than drawing independent Gaussians (that path survives only as a warned fallback). Resampling factors must be 1 or even and divide the length exactly. Texture seed and slider values stay separately seeded.
 
 ## Vocoder and path configuration
 
@@ -233,7 +235,7 @@ Paths in the table are relative to `kicks/`.
 - Documentation: verify options against current `--help`, local links/anchors, artifact names and Markdown/SVG rendering. No training or full app build is needed just to edit prose.
 - Loss/model/schedules/fidelity/promotion: `uv run pytest -q tests/test_high_fidelity.py`; add/run checks covering the changed behavior.
 - Tracking/dashboard: `uv run pytest -q tests/test_training_tracking.py`; inspect desktop/mobile charts, live updates, note preservation and standalone HTML when UI behavior changes. The viewer serves both backends, so check a VAE run and a diffusion run.
-- Waveform diffusion: `uv run pytest -q tests/test_diffusion.py`. The tests cover the schedule, conditioning, determinism, checkpoints and the tracked loop only; they establish nothing about how the backend sounds.
+- Waveform diffusion: `uv run pytest -q tests/test_diffusion.py tests/test_make_subset.py`. The tests cover the schedule, conditioning, target drawing, determinism, checkpoints, the tracked loop and subset building only; they establish nothing about how the backend sounds.
 - Controls/calibration/vocoders: relevant `tests/test_audio_controls.py` / `tests/test_discoder.py`; use matched waveform/control audits when claiming audio improvement. For snare/hi-hat identity changes, rerun `scripts/validate_controls.py --control identity --texture-seeds ...` and `scripts/compare_identity.py`, and report multi-onset counts and target errors separately for centre, axis and random probes.
 - API/auth/publication: `tests/test_api_auth.py`, `tests/test_publish.py`; full Python regression command is `uv run pytest -q`.
 - Website: from `web/`, `pnpm lint` then `pnpm build`; inspect affected views. Publishing generated analysis is a separate write step, not part of ordinary lint/build checks.

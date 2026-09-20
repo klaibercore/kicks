@@ -480,16 +480,17 @@ uv run kicks diffusion-generate -i kick -n 8 --steps 50 --target punch=9
 Runs land in the same dashboard as VAE runs. `--seed` is the texture seed and
 `--target` pins a slider, so one can be held while the other moves.
 
-On an 8 GB Apple Silicon Mac, pass `--batch-size 2 --grad-accum 16`: the
+On an 8 GB Apple Silicon Mac, pass `--batch-size 2 --grad-accum 4`: the
 default batch of 8 exceeds the MPS working set and runs about 8× slower per
 sample. Measured on an M1, one epoch costs roughly 27 min for hi-hats, 38 min
 for snares and 48 min for kicks, and one 50-step sample takes about 6 s, so
-train in short screens and resumable chunks, hi-hat first. Default
-`diffusion-generate` targets are currently drawn off the corpus distribution
-(a known issue); pin descriptors until that is fixed.
+train on stratified subsets from `scripts/make_subset.py` — a 256-hit hour,
+then a 2,000-hit night — before a full corpus, hi-hat first. Generation
+targets are resampled from the checkpoint's own training rows, so a default
+`diffusion-generate` asks for combinations real hits had.
 [`docs/waveform-diffusion.md`](docs/waveform-diffusion.md) has the design, the
-measurements, the staged run sequence and the full list of what has not been
-measured.
+measurements, the budget table, the run sequence and the full list of what has
+not been measured.
 
 </details>
 

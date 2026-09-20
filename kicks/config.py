@@ -107,6 +107,7 @@ def load_diffusion_from_checkpoint(
         **architecture,
     )
     model.load_state_dict(checkpoint["model"])
+    model.set_label_bank(checkpoint.get("label_bank"))
     model.to(device)
     model.eval()
     return model, checkpoint

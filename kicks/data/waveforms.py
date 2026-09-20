@@ -112,14 +112,18 @@ class WaveformDataset(Dataset):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         return self.waveforms[idx], self.labels[idx]
 
+    def label_matrix(self, indices=None) -> torch.Tensor:
+        """Descriptor rows over ``indices`` (all by default), one hit per row."""
+        chosen = range(len(self)) if indices is None else list(indices)
+        if not chosen:
+            raise ValueError("label statistics need at least one sample")
+        return torch.stack([self.labels[i] for i in chosen])
+
     def label_stats(self, indices=None) -> tuple[np.ndarray, np.ndarray]:
         """Descriptor mean and standard deviation over ``indices`` (all by default).
 
         Pass the *training* split's indices: normalising with statistics that
         have seen the validation hits leaks them into the conditioning.
         """
-        chosen = range(len(self)) if indices is None else list(indices)
-        if not chosen:
-            raise ValueError("label statistics need at least one sample")
-        stacked = torch.stack([self.labels[i] for i in chosen]).numpy()
+        stacked = self.label_matrix(indices).numpy()
         return stacked.mean(axis=0), stacked.std(axis=0)

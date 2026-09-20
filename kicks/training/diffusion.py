@@ -123,6 +123,17 @@ def diffusion_loss(
     return squared.mean() if reduce else squared.mean(dim=tuple(range(1, squared.dim())))
 
 
+def _accumulation_group(index: int, batches: int, grad_accum: int) -> int:
+    """Micro-batches in the accumulation group that 1-based ``index`` belongs to.
+
+    Every group holds ``grad_accum`` micro-batches except the last one of an
+    epoch, which holds whatever remains. Dividing each loss by its own group's
+    size makes every optimizer step a mean, not a fraction of one.
+    """
+    full = batches - batches % grad_accum
+    return grad_accum if index <= full else batches - full
+
+
 def _validation_sigmas(count: int, offset: int, total: int, device, dtype) -> torch.Tensor:
     """Fixed noise levels, assigned by position in the split rather than at random.
 
@@ -183,16 +194,26 @@ def train_diffusion(
         dataset, [len(dataset) - n_val, n_val],
         generator=torch.Generator().manual_seed(seed),
     )
+    # A short trailing micro-batch would otherwise count as a full one inside
+    # its accumulation group; dropping it keeps every optimizer step an
+    # unweighted mean over equally sized micro-batches. Tiny corpora that do not
+    # fill one micro-batch keep theirs, or there would be nothing to train on.
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,
+                              drop_last=len(train_set) >= batch_size,
                               generator=torch.Generator().manual_seed(seed))
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False)
 
     # Conditioning statistics come from the training split only; fitting them on
     # the whole corpus would leak the validation hits into every label the model
-    # ever sees. A resumed model keeps the statistics it was trained with.
-    if source_checkpoint is None and hasattr(dataset, "label_stats"):
-        mean, std = dataset.label_stats(train_set.indices)
-        model.set_label_stats(mean, std)
+    # ever sees. A resumed model keeps the statistics it was trained with. The
+    # label bank — the rows generation draws its targets from — is rebuilt from
+    # the current split either way, so targets follow the corpus being trained
+    # on rather than the one the weights started from.
+    if hasattr(dataset, "label_stats"):
+        if source_checkpoint is None:
+            mean, std = dataset.label_stats(train_set.indices)
+            model.set_label_stats(mean, std)
+        model.set_label_bank(dataset.label_matrix(train_set.indices))
 
     config = {
         "instrument": profile.name,
@@ -241,6 +262,7 @@ def train_diffusion(
     def save(path: str, **extra) -> None:
         torch.save({
             "model": ema.state_dict(model),
+            "label_bank": model.label_bank,
             "instrument": profile.name,
             "descriptors": [d.key for d in profile.descriptors],
             "training": {
@@ -339,6 +361,7 @@ def train_diffusion(
                 model.train()
                 losses, sizes = [], []
                 optimizer.zero_grad(set_to_none=True)
+                batches = len(train_loader)
                 for index, (audio, labels) in enumerate(train_loader, 1):
                     audio, labels = audio.to(device), labels.to(device)
                     count = len(audio)
@@ -348,8 +371,8 @@ def train_diffusion(
                     loss = diffusion_loss(model, audio, labels, sigmas, noise, cond_mask=keep)
                     if not math.isfinite(loss.item()):
                         raise FloatingPointError("Training loss became non-finite")
-                    (loss / grad_accum).backward()
-                    if index % grad_accum == 0 or index == len(train_loader):
+                    (loss / _accumulation_group(index, batches, grad_accum)).backward()
+                    if index % grad_accum == 0 or index == batches:
                         optimizer.step()
                         optimizer.zero_grad(set_to_none=True)
                         ema.update(model)

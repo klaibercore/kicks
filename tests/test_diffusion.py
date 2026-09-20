@@ -36,6 +36,7 @@ from kicks.synthesis.diffusion import draw_labels, generate_diffusion
 from kicks.training.diffusion import (
     EMA,
     VALIDATION_RANGE,
+    _accumulation_group,
     _validation_sigmas,
     diffusion_loss,
     train_diffusion,
@@ -206,18 +207,65 @@ def test_sampler_refuses_a_label_batch_that_does_not_match_the_noise():
         v_sample(model, batch=1, steps=0)
 
 
-def test_targets_are_drawn_from_the_trained_distribution_and_pinned_where_asked():
-    model = tiny(length=1024)
-    model.set_label_stats([10.0, 20, 30, 40, 50], [1.0, 1, 1, 1, 1])
-    labels = draw_labels(model, 64, {"punch": 7.5}, KICK, seed=3)
+def correlated_bank(rows: int = 400, seed: int = 0) -> torch.Tensor:
+    """A bank whose second column follows its first: what real sliders do."""
+    generator = torch.Generator().manual_seed(seed)
+    first = 10 + 3 * torch.randn(rows, generator=generator)
+    return torch.stack([
+        first, 2 * first + 0.2 * torch.randn(rows, generator=generator),
+        30 + torch.randn(rows, generator=generator), torch.full((rows,), 40.0),
+        (5 * torch.randn(rows, generator=generator)).abs(),           # a decay: never negative
+    ], dim=1)
 
-    assert labels.shape == (64, 5)
-    assert torch.allclose(labels[:, 1], torch.full((64,), 7.5))
-    # The free axes stay near the corpus mean rather than around zero.
-    assert abs(float(labels[:, 0].mean()) - 10.0) < 0.5
-    torch.testing.assert_close(labels, draw_labels(model, 64, {"punch": 7.5}, KICK, seed=3))
+
+def test_targets_are_resampled_from_the_bank_not_its_moments():
+    model = tiny(length=1024)
+    bank = correlated_bank()
+    model.set_label_stats(bank.mean(dim=0), bank.std(dim=0))
+    model.set_label_bank(bank)
+
+    labels = draw_labels(model, 200, None, KICK, seed=3)
+    assert labels.shape == (200, 5)
+    # Every target is a row a real hit had — in particular no negative decay,
+    # which the Gaussian around these moments would produce for ~30 % of draws.
+    rows = {tuple(row.tolist()) for row in bank}
+    assert all(tuple(row.tolist()) in rows for row in labels)
+    assert float(labels[:, 4].min()) >= 0
+    torch.testing.assert_close(labels, draw_labels(model, 200, None, KICK, seed=3))
+    assert not torch.equal(labels, draw_labels(model, 200, None, KICK, seed=4))
     with pytest.raises(ValueError, match="no descriptor"):
         draw_labels(model, 2, {"sizzle": 1.0}, KICK, seed=3)
+
+
+def test_pinning_a_descriptor_keeps_the_others_consistent_with_it():
+    model = tiny(length=1024)
+    bank = correlated_bank()
+    model.set_label_stats(bank.mean(dim=0), bank.std(dim=0))
+    model.set_label_bank(bank)
+
+    high = draw_labels(model, 64, {"sub": 16.0}, KICK, seed=1)
+    low = draw_labels(model, 64, {"sub": 4.0}, KICK, seed=1)
+    assert torch.allclose(high[:, 0], torch.full((64,), 16.0))
+    assert torch.allclose(low[:, 0], torch.full((64,), 4.0))
+    # "punch" follows "sub" in this corpus, so the free column moved with the
+    # pinned one instead of sitting at the corpus mean for both.
+    assert float(high[:, 1].mean()) > 2 * 14 and float(low[:, 1].mean()) < 2 * 6
+    # A value the corpus never had is honoured, and flagged.
+    with pytest.warns(UserWarning, match="outside the training range"):
+        extreme = draw_labels(model, 4, {"sub": 100.0}, KICK, seed=1)
+    assert torch.allclose(extreme[:, 0], torch.full((4,), 100.0))
+
+
+def test_without_a_bank_targets_fall_back_to_gaussians_with_a_warning():
+    model = tiny(length=1024)
+    model.set_label_stats([10.0, 20, 30, 40, 50], [1.0, 1, 1, 1, 1])
+    with pytest.warns(UserWarning, match="no label bank"):
+        labels = draw_labels(model, 64, {"punch": 7.5}, KICK, seed=3)
+    assert labels.shape == (64, 5)
+    assert torch.allclose(labels[:, 1], torch.full((64,), 7.5))
+    assert abs(float(labels[:, 0].mean()) - 10.0) < 0.5
+    with pytest.raises(ValueError, match="at least one row"):
+        model.set_label_bank(torch.zeros(0, 5))
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +315,14 @@ def test_validation_levels_sweep_the_whole_schedule_however_small_the_split():
     torch.testing.assert_close(whole[5:], tail)
 
 
+def test_every_optimizer_step_averages_the_micro_batches_it_actually_saw():
+    # Nine micro-batches in groups of four: two full groups, then one of one.
+    assert [_accumulation_group(i, 9, 4) for i in range(1, 10)] == [4] * 8 + [1]
+    assert [_accumulation_group(i, 8, 4) for i in range(1, 9)] == [4] * 8
+    assert [_accumulation_group(i, 3, 4) for i in range(1, 4)] == [3] * 3
+    assert [_accumulation_group(i, 5, 1) for i in range(1, 6)] == [1] * 5
+
+
 def test_ema_warms_up_towards_the_weights_then_averages_them():
     model = tiny(length=1024)
     ema = EMA(model, 0.999)
@@ -307,6 +363,8 @@ def test_training_records_a_run_writes_checkpoints_and_reloads(tmp_path):
                               length=LENGTH, verbose=False)
     model = tiny()
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    steps = []
+    optimizer.register_step_post_hook(lambda *_: steps.append(1))
 
     curves = train_diffusion(
         model, dataset, optimizer, profile, epochs=2, batch_size=4, val_split=0.25,
@@ -322,6 +380,9 @@ def test_training_records_a_run_writes_checkpoints_and_reloads(tmp_path):
     assert run["config"]["backend"] == "waveform_diffusion"
     assert run["config"]["split_fingerprint"]
     assert run["config"]["effective_batch"] == 8
+    # Nine training hits at batch 4 accumulate in pairs: the short third
+    # micro-batch is dropped, so each epoch is exactly one optimizer step.
+    assert run["config"]["train_samples"] == 9 and len(steps) == 2
     assert run["notes"]["objective"] == "cover the loop"
     assert len(run["history"]) == 3                       # epoch 0 baseline plus two
     assert run["history"][-1]["control_mae"] is not None
@@ -338,6 +399,9 @@ def test_training_records_a_run_writes_checkpoints_and_reloads(tmp_path):
     assert meta["training"]["run_id"] == run["id"]
     assert meta["descriptors"] == [d.key for d in profile.descriptors]
     assert reloaded.architecture == model.architecture
+    # The bank is the training split's rows — nine of twelve — and comes back.
+    assert reloaded.label_bank.shape == (9, len(profile.descriptors))
+    torch.testing.assert_close(reloaded.label_bank, model.label_bank)
     labels = draw_labels(reloaded, 2, None, profile, seed=1)
     torch.testing.assert_close(
         v_sample(reloaded, labels=labels, steps=2,
@@ -381,7 +445,12 @@ class _Exploding(torch.nn.Module):
     def forward(self, noisy, sigmas, labels=None, cond_mask=None):
         return torch.full_like(noisy, float("nan")) + self.weight
 
+    label_bank = None
+
     def set_label_stats(self, mean, std):
+        pass
+
+    def set_label_bank(self, bank):
         pass
 
     def checkpoint_meta(self):
@@ -417,12 +486,14 @@ def test_the_loader_refuses_a_vae_and_a_foreign_instruments_sliders(tmp_path):
 def test_generation_writes_audio_and_honours_explicit_targets(tmp_path):
     profile = scoped(tmp_path)
     model = wake(tiny())
-    model.set_label_stats(*WaveformDataset(str(corpus(tmp_path / "kicks", 4)), profile,
-                                           length=LENGTH, verbose=False).label_stats())
+    dataset = WaveformDataset(str(corpus(tmp_path / "kicks", 4)), profile,
+                              length=LENGTH, verbose=False)
+    model.set_label_stats(*dataset.label_stats())
+    model.set_label_bank(dataset.label_matrix())
     os.makedirs(profile.paths.model_dir, exist_ok=True)
-    torch.save({"model": model.state_dict(), "instrument": "kick",
-                "descriptors": [d.key for d in profile.descriptors], "epoch": 1,
-                **model.checkpoint_meta()}, profile.paths.diffusion_checkpoint)
+    torch.save({"model": model.state_dict(), "label_bank": model.label_bank,
+                "instrument": "kick", "descriptors": [d.key for d in profile.descriptors],
+                "epoch": 1, **model.checkpoint_meta()}, profile.paths.diffusion_checkpoint)
 
     paths = generate_diffusion(
         count=2, instrument="kick", checkpoint=profile.paths.diffusion_checkpoint,

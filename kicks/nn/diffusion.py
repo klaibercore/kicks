@@ -310,6 +310,11 @@ class WaveformUNet(nn.Module):
         # training split so inference cannot drift from what was learned.
         self.register_buffer("label_mean", torch.zeros(n_descriptors))
         self.register_buffer("label_std", torch.ones(n_descriptors))
+        # The training split's descriptor rows, in raw units, for drawing
+        # generation targets that lie on the corpus rather than around its
+        # moments. Not a buffer: its length is the split's, so it travels in the
+        # checkpoint beside the weights rather than inside the state dict.
+        self.label_bank: torch.Tensor | None = None
 
         depth = len(channels)
         deepest = depth - self.attention_scales
@@ -353,6 +358,16 @@ class WaveformUNet(nn.Module):
         self.label_mean.copy_(mean.to(self.label_mean.device))
         # A descriptor that never varies would otherwise divide by zero.
         self.label_std.copy_(std.clamp_min(1e-6).to(self.label_std.device))
+
+    def set_label_bank(self, bank) -> None:
+        """Record the training split's descriptor rows; ``None`` clears them."""
+        if bank is None:
+            self.label_bank = None
+            return
+        bank = torch.as_tensor(bank, dtype=torch.float32).detach().cpu().reshape(-1, self.n_descriptors)
+        if bank.shape[0] == 0:
+            raise ValueError("a label bank needs at least one row")
+        self.label_bank = bank.clone()
 
     def embed(self, sigmas: torch.Tensor, labels, cond_mask, batch: int) -> torch.Tensor:
         noise = self.noise_embedding(sigmas)

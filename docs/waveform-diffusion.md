@@ -18,9 +18,8 @@ Reviewed and merged into `main` on 2026-09-19. The review ran the test module
 and a step-time / memory probe of the untrained network on an Apple M1 with
 8 GB of unified memory; those figures are under
 [Apple Silicon and other 8 GB machines](#apple-silicon-and-other-8-gb-machines).
-It also found two defects, listed under [Known issues](#known-issues). They are
-not fixed yet; the second one must be fixed before any control evidence is
-collected with `diffusion-generate`.
+It also found two defects, recorded under [Known issues](#known-issues); both
+were fixed on 2026-09-20, before any run.
 
 ## What it is
 
@@ -69,7 +68,8 @@ summed, and turned into a per-channel scale and shift (FiLM) inside every
 residual block. Descriptor values enter in the profile's own raw units; the
 training split's mean and standard deviation are stored as buffers in the
 checkpoint and applied inside the network, so a caller cannot pair a checkpoint
-with the wrong normalization.
+with the wrong normalization. The checkpoint also carries the training split's
+descriptor rows (`label_bank`), which is where generation draws its targets.
 
 A fraction of each batch (`--cond-dropout`, 0.1 by default) is trained against a
 learned null embedding instead of its descriptors. That is what makes
@@ -143,6 +143,11 @@ uv run kicks diffusion-train -i kick \
 
 `--model-dir` moves only `KICKS_MODEL_DIR`. Unlike `kicks train`, there is no
 vocoder in this path, so there is nothing to pin back to the shared root.
+`--resume` keeps the checkpoint's descriptor mean/std but rebuilds the label
+bank from the current training split, so targets follow the corpus being
+trained on. The training loader drops a short final micro-batch and every
+optimizer step divides by the number of micro-batches its accumulation group
+really holds, so each step is a mean over equally sized micro-batches.
 
 ### What the run records
 
@@ -192,9 +197,12 @@ about how the backend sounds.
 
 Consequences:
 
-* Use `--batch-size 2 --grad-accum 16` (effective batch 32, the documented
-  default) on an 8 GB machine. The CLI defaults of `8` / `4` are right for a
-  discrete GPU and wrong here; do not use autocast on MPS.
+* Use `--batch-size 2` on an 8 GB machine. The CLI default of `8` is right for
+  a discrete GPU and wrong here; do not use autocast on MPS. For budgeted runs
+  pair it with `--grad-accum 4` (effective batch 8): the cost per hit is fixed,
+  so a smaller effective batch buys four times the optimizer steps of the
+  documented effective 32 in the same time. Go back to `--grad-accum 16` only
+  if the train curve is too noisy to read.
 * Cost saturates at about 0.32 s per hit per epoch, so with the current corpora
   one epoch is roughly 27 min for hi-hats (5,824 hits), 38 min for snares
   (7,994) and 48 min for kicks (10,109). The 200-epoch default is four to seven
@@ -203,28 +211,69 @@ Consequences:
   so `--eval-every`, `--preview` and audits are expensive; budget for them.
 * `WaveformDataset` keeps the whole corpus in RAM as float32: 2.47 GiB for
   kicks, 1.95 GiB for snares, 1.42 GiB for hi-hats, in the same 8 GB the GPU
-  uses. Stop `kicks serve` and `next dev` before training; a compact in-memory
-  format (int16 or float16) is a planned change, not a shipped one.
+  uses. Stop `kicks serve` and `next dev` before training. Subsets of up to
+  about 3,000 hits need no change; a compact in-memory format (int16) is
+  planned before any full-corpus run, not shipped.
 * Run long jobs under `caffeinate -i` inside tmux or `nohup` so sleep or a
   closed terminal does not kill them. A hard kill leaves the run `running`;
   the dashboard marks it stale. Watch `epoch_seconds` — a fanless M1 throttles.
 
-Suggested sequence, hi-hat first (the identity problem, the smallest corpus,
-the fastest epochs), then snare:
+#### Corpus size against wall-clock budget
 
-1. **Smoke test, about ten minutes.** A 64-file directory of symlinks passed
-   with `--data`, `--epochs 2 --batch-size 2 --grad-accum 4 --eval-every 1
+`epoch ≈ 0.9 × N × 0.32 s`, so a budget buys a fixed number of sample-passes
+(about 11k per hour) however it is split between corpus size and epochs. The
+table assumes `--batch-size 2 --grad-accum 4` and the hi-hat corpus; the
+snare (7,994 hits, 38 min/epoch) and kick (10,109, 48 min/epoch) equivalents
+scale with the corpus.
+
+| Budget | Corpus (stratified subset) | Epochs | s/epoch | Optimizer steps | What it can tell you |
+|---|---|---|---|---|---|
+| 10 min | 64 hits | 2 | 18 | 14 | The pipeline works |
+| 1 h | 256 hits | ~45 | 74 | ~1,300 | Loss falls in all three sigma bands; samples stop being white noise. No listening verdicts. |
+| 4 h | 1,000 hits | 50 | 288 | ~5,600 | First listen: is there a stick and a sizzle at all? |
+| 10 h | 2,000 hits | ~60 | 576 | ~13,500 | First real result: blind listening against studio renders, descriptor sweeps |
+| 24 h | 3,000 hits | ~100 | 864 | ~34,000 | Diversity across all families; guidance scale sweep |
+| 48 h | full hi-hat, 5,824 | ~100 | 1,680 | ~66,000 | Only after a 10 h run sounded like a hi-hat; `--resume` from it |
+| 4–7 days | full corpus, 200 epochs | 200 | — | — | Not on this machine |
+
+A 2,000-hit subset gives about 120k sample-passes in ten hours — the same
+compute as twenty full-corpus epochs, with three times the passes per hit —
+and can be resumed onto the full corpus later.
+
+Subsets come from `scripts/make_subset.py`:
+
+```bash
+uv run python scripts/make_subset.py --instrument hihat --size 2000 --seed 42
+# -> data/_subsets/hihat-2000/, symlinks plus manifest.json
+```
+
+It draws in proportion to the families in the instrument's cluster report
+(`kicks cluster` writes it), refuses a report whose file list no longer
+matches the corpus, and nests: with the same seed the 256-file subset is
+inside the 2,000-file one. Name the subset directory and seed in the run
+notebook. Two other levers change the contract and are not used here:
+halving the window to 32,768 samples (halves cost and memory but truncates
+the quarter of hi-hat files longer than 743 ms) and halving `--channels`.
+
+#### Suggested sequence
+
+Hi-hat first (the identity problem, the smallest corpus, the fastest epochs),
+then snare. Each step waits for the previous one's evidence.
+
+1. **Smoke test, about ten minutes.** `data/_subsets/hihat-64` passed with
+   `--data`, `--epochs 2 --batch-size 2 --grad-accum 4 --eval-every 1
    --eval-samples 4 --eval-steps 10`, its own `--model-dir`. Confirms the loop,
    the dashboard retargeting, the EMA checkpoint and `diffusion-generate`.
-2. **Overnight screen, 20 epochs.** Full corpus, `--batch-size 2 --grad-accum 16
-   --eval-every 5 --preview 0`, notebook filled in. Record that the cosine
-   schedule spans only these 20 epochs. Sample eight hits at 50 steps and
-   listen; a falling `val_loss_low_sigma` with samples that are still noise is
-   normal this early, a flat one is the stop signal.
-3. **Long run in chunks** via `--resume`, 50 epochs at a time. `--resume`
-   starts a fresh optimizer and restarts the cosine schedule, and its
-   learning-rate default is 3e-5, so pass `--learning-rate 1e-4` to continue at
-   the new-model rate and note the warm restart in the notebook.
+2. **One-hour signal check.** 256 hits, ~45 epochs, `--eval-every 15`. Pass or
+   fail on the curves and on "not white noise", nothing else; a low-sigma band
+   that never moves means look at the code, not at a longer run.
+3. **Overnight, 2,000 hits, ~60 epochs.** `--eval-every 10 --preview 0`,
+   notebook filled in, cosine horizon and subset recorded. Sample eight hits
+   at 50 steps and listen, level-matched against studio renders.
+4. **Weekend, full corpus, only if the overnight run sounded like a hi-hat**:
+   `--resume` from it for ~100 epochs. `--resume` starts a fresh optimizer,
+   restarts the cosine schedule and defaults the learning rate to 3e-5, so pass
+   `--learning-rate 1e-4` and note the warm restart in the notebook.
 
 Evidence stays the same as for the VAE: `kicks eval --pattern 'diff_*.wav'`
 for set-level corpus distance, level-matched blind listening against studio
@@ -249,12 +298,15 @@ Each sample prints its achieved descriptor values against its targets and its
 raw peak. A sample is scaled down only if it would clip on write, so a model
 whose output level drifts off the corpus stays visible.
 
-**Known issue.** `draw_labels()` draws every unpinned descriptor from an
-independent Gaussian with the training split's mean and standard deviation.
-The descriptors are neither Gaussian nor independent, so many targets lie
-outside anything the model saw; see [Known issues](#known-issues) for the
-numbers. Until this is fixed, treat default `diffusion-generate` targets as
-off-distribution and pin descriptors to corpus percentiles by hand.
+Targets come from the checkpoint's label bank — the training split's
+descriptor rows. Unpinned descriptors are resampled from those rows, so every
+target is a combination a real hit had. A pinned `--target` selects the bank's
+nearest rows in the pinned descriptor (standardised distance; at least 16 rows
+or 5 % of the bank) before setting the value exactly, so the free descriptors
+are the ones the corpus pairs with that value rather than the corpus average.
+A pinned value outside the bank's range is honoured and warned about. A
+checkpoint without a bank falls back to independent Gaussians, with a warning;
+see [Known issues](#known-issues) for why that is a poor default.
 
 ## Decisions taken
 
@@ -297,7 +349,10 @@ the evidence above, not the code alone.
 
 ## Known issues
 
-Found in the 2026-09-19 review; neither is fixed in this revision.
+Found in the 2026-09-19 review; both fixed on 2026-09-20 as described at the
+end of each item. They stay here because they explain two contracts —
+where targets come from, and what an optimizer step averages — that a reader
+of an older checkpoint or run record needs.
 
 1. **Descriptor targets are drawn off the corpus manifold.** `draw_labels()` in
    `kicks/synthesis/diffusion.py` samples each descriptor independently from
@@ -310,10 +365,11 @@ Found in the 2026-09-19 review; neither is fixed in this revision.
    failure `docs/audio-identity-plan.md` fixed for the VAE studio path.
    Training is unaffected, because training labels are measured, and the
    in-loop `control_mae` proxy resamples real validation labels, so the proxy
-   can look healthy while default generation produces blips. Planned fix:
-   save the training split's label matrix in the checkpoint and resample rows
-   from it (nearest rows when a descriptor is pinned), keeping the Gaussian
-   only as a fallback for checkpoints without that bank.
+   can look healthy while default generation produces blips. **Fixed:** the
+   training split's label matrix is saved in the checkpoint as `label_bank`
+   and `draw_labels()` resamples its rows, nearest rows first when a
+   descriptor is pinned; the Gaussian remains only as a warned fallback for
+   checkpoints written before the bank existed.
 2. **The trailing gradient-accumulation group is under-weighted.** The loop
    scales every micro-batch loss by `1 / grad_accum` and steps at
    `index % grad_accum == 0 or index == len(train_loader)`, so when the number
@@ -321,5 +377,7 @@ Found in the 2026-09-19 review; neither is fixed in this revision.
    step of each epoch sees a gradient scaled by `remainder / grad_accum`, and
    with `drop_last=False` a short final micro-batch's mean counts as a full
    one. One step in a few hundred per epoch — harmless in practice, and the
-   recorded `train_loss` is already size-weighted — but `drop_last=True` on the
-   training loader removes it. Planned alongside the fix above.
+   recorded `train_loss` is already size-weighted. **Fixed:** the training
+   loader drops a short final micro-batch, and each loss is divided by the
+   size of its own accumulation group (`_accumulation_group`), so every step
+   is a mean.
