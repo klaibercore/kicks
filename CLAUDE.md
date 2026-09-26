@@ -6,6 +6,7 @@
 - Human setup and product guide: `README.md`. Experiment sequence and research rationale: `docs/high-fidelity-generation.md`. Snare/hi-hat identity controls and their measured audit: `docs/audio-identity-plan.md`. Waveform diffusion backend, its 8 GB Apple Silicon measurements and known issues: `docs/waveform-diffusion.md`.
 - Read current code and `git diff` before changing behavior. Local corpora, checkpoints and active jobs can change independently of Git; inspect them before making claims about the current model.
 - Preserve unrelated work. Do not restart an existing training process to attach telemetry.
+- Corpus identity and licensing after the numeric rename are anchored by `data/corpus_ids.json` and the three local `data/{kicks,snares,hihats}/SOURCES.md` files. Preserve them. The Modal `kicks-corpus` volume intentionally contains WAVs only; remote verification must require exact names, sizes and SHA-256 hashes but must not require or upload `SOURCES.md`.
 - For files under `web/`, read `web/AGENTS.md` and `web/CLAUDE.md`; consult the installed Next.js docs they specify before editing application code.
 - Implemented: HF/attack loss experiments, residual/latent options, soft log-variance bound, beta schedule controls, tracking, fidelity/listening reports, control audits and promotion records.
 - Implemented and first-trained: the descriptor-conditioned waveform diffusion backend (issue #3), merged 2026-09-19, trained on hi-hat subsets of 256 and 1,000 hits on 2026-09-20 (checkpoints under `models/experiments/diffusion-hihat-*`, runs in the dashboard, numbers in `docs/waveform-diffusion.md` → *First runs*). Blind listening is prepared (`scripts/diffusion_listening.py`, report `hihat-diffusion-1000-ab`) but unjudged; nothing is served, and `kicks promote` does not know this backend. Do not describe it as a working alternative to the VAE, and do not compare the two beyond the measurements recorded. On this 8 GB Apple Silicon machine train on stratified subsets (`scripts/make_subset.py`) with `--batch-size 2 --grad-accum 4`, launched detached (`nohup … &`, verify the parent is `launchd`) so a session ending cannot kill it. Training phases wait for the user's go, each preceded by a summary of the previous phase.
@@ -31,6 +32,9 @@ uv run kicks diffusion-train -i hihat --data data/_subsets/hihat-2000 \
   --model-dir models/experiments/diffusion \
   --batch-size 2 --grad-accum 4            # 8 GB Apple Silicon; the default batch of 8 thrashes MPS
 uv run kicks diffusion-generate -i hihat -n 8 --steps 50 --target decay=40
+uv run --script scripts/modal_train.py check-local                # local-only corpus/license verification
+uv run --script scripts/modal_train.py verify --confirm-cloud     # read-only Modal WAV verification
+uv run --script scripts/modal_train.py image-test --confirm-cloud # reviewed container/protobuf gate
 uv run python scripts/diffusion_listening.py --instrument hihat --checkpoint models/experiments/diffusion-hihat-1000-b/hihat/diffusion_best.pth \
   --run 20260920T124135 --out output/fidelity/hihat-diffusion-1000-ab   # blind generation A/B pairs for the Listening lab
 uv run kicks eval -i kick
@@ -47,6 +51,12 @@ Website, from `web/`: `pnpm install`, `pnpm dev` (:3000), `pnpm lint`, `pnpm bui
 `docker compose up --build` serves the API with mounted data/models/output. The supplied Compose file reserves an NVIDIA GPU; adapt that reservation for other hosts.
 
 ## Required training workflow
+
+For remote waveform-diffusion work, follow `docs/modal-training.md`. Each cloud
+operation is a separate review gate. `plan` is local-only; `launch` is detached
+and must have a current `output/modal/corpus-verification.json` receipt. Corpus
+data is mounted read-only and results are written to `kicks-training`; `sync`
+preserves existing local `notes.json` and `notes.js`.
 
 ### Before training
 
@@ -242,7 +252,7 @@ Paths in the table are relative to `kicks/`.
 - Documentation: verify options against current `--help`, local links/anchors, artifact names and Markdown/SVG rendering. No training or full app build is needed just to edit prose.
 - Loss/model/schedules/fidelity/promotion: `uv run pytest -q tests/test_high_fidelity.py`; add/run checks covering the changed behavior.
 - Tracking/dashboard: `uv run pytest -q tests/test_training_tracking.py`; inspect desktop/mobile charts, live updates, note preservation and standalone HTML when UI behavior changes. The viewer serves both backends, so check a VAE run and a diffusion run, plus the Listening lab against a real `output/fidelity/*` report. The template is read per request, so HTML edits are live at once; server-side changes in `tracking.py` need the viewer restarted (the training process is separate and keeps its own copy). Fidelity detail responses include corpus sample paths — the viewer is loopback-only and never a publication path.
-- Waveform diffusion: `uv run pytest -q tests/test_diffusion.py tests/test_make_subset.py tests/test_diffusion_listening.py`. The tests cover the schedule, conditioning, target drawing, determinism, checkpoints, the tracked loop, subset building and the listening-pair writer only; they establish nothing about how the backend sounds. Evidence for this backend is `kicks eval --pattern`, the direct tail-floor / onset measurements and blind pairs from `scripts/diffusion_listening.py` (a generation A/B with `held_out: false`, never a reconstruction fidelity report); `kicks fidelity` and `scripts/validate_controls.py` are VAE-only.
+- Waveform diffusion: `uv run pytest -q tests/test_diffusion.py tests/test_make_subset.py tests/test_diffusion_listening.py tests/test_modal_train.py tests/test_rename_corpus.py`. The Modal wrapper tests cover its local contracts only (corpus verification, spec validation, the restart guard, periodic commits, note-preserving sync); cloud behaviour is established by the reviewed gates in `docs/modal-training.md`. The tests cover the schedule, conditioning, target drawing, determinism, checkpoints, the tracked loop, subset building and the listening-pair writer only; they establish nothing about how the backend sounds. Evidence for this backend is `kicks eval --pattern`, the direct tail-floor / onset measurements and blind pairs from `scripts/diffusion_listening.py` (a generation A/B with `held_out: false`, never a reconstruction fidelity report); `kicks fidelity` and `scripts/validate_controls.py` are VAE-only.
 - Controls/calibration/vocoders: relevant `tests/test_audio_controls.py` / `tests/test_discoder.py`; use matched waveform/control audits when claiming audio improvement. For snare/hi-hat identity changes, rerun `scripts/validate_controls.py --control identity --texture-seeds ...` and `scripts/compare_identity.py`, and report multi-onset counts and target errors separately for centre, axis and random probes.
 - API/auth/publication: `tests/test_api_auth.py`, `tests/test_publish.py`; full Python regression command is `uv run pytest -q`.
 - Website: from `web/`, `pnpm lint` then `pnpm build`; inspect affected views. Publishing generated analysis is a separate write step, not part of ordinary lint/build checks.
