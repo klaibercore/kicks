@@ -21,6 +21,7 @@ pass per evaluation and is off by default.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import time
@@ -215,6 +216,15 @@ def train_diffusion(
             model.set_label_stats(mean, std)
         model.set_label_bank(dataset.label_matrix(train_set.indices))
 
+    execution_context = None
+    if encoded_context := os.environ.get("KICKS_TRAINING_CONTEXT"):
+        try:
+            execution_context = json.loads(encoded_context)
+        except json.JSONDecodeError as error:
+            raise ValueError("KICKS_TRAINING_CONTEXT must be valid JSON") from error
+        if not isinstance(execution_context, dict):
+            raise ValueError("KICKS_TRAINING_CONTEXT must contain a JSON object")
+
     config = {
         "instrument": profile.name,
         "backend": "waveform_diffusion",
@@ -246,7 +256,21 @@ def train_diffusion(
         "validation_objective": "fixed_sigma_grid_fixed_noise_v1",
         "preprocessing": PREPROCESSING,
         "split_fingerprint": split_fingerprint(dataset, seed, val_split),
+        "runtime": {
+            "torch": torch.__version__,
+            "cuda_runtime": torch.version.cuda,
+            "cudnn": torch.backends.cudnn.version() if torch.backends.cudnn.is_available() else None,
+            "accelerator": (
+                {
+                    "name": torch.cuda.get_device_name(device),
+                    "total_memory_bytes": torch.cuda.get_device_properties(device).total_memory,
+                }
+                if device.type == "cuda" else {"name": str(device)}
+            ),
+        },
     }
+    if execution_context is not None:
+        config["execution"] = execution_context
     run = tracker or TrainingRun(
         runs_root(runs_dir, paths.output_root), config, name=run_name,
         notes={"objective": intent, "hypothesis": hypothesis,
@@ -260,6 +284,9 @@ def train_diffusion(
     noise_generator = torch.Generator().manual_seed(seed + 1)
 
     def save(path: str, **extra) -> None:
+        # Write beside the target and rename, so a kill or a volume snapshot
+        # mid-write never leaves a truncated best checkpoint behind.
+        temporary = f"{path}.tmp"
         torch.save({
             "model": ema.state_dict(model),
             "label_bank": model.label_bank,
@@ -273,7 +300,8 @@ def train_diffusion(
                 "validation": config["validation_objective"],
             },
             **model.checkpoint_meta(), **extra,
-        }, path)
+        }, temporary)
+        os.replace(temporary, path)
 
     def validate() -> dict[str, float]:
         totals = {"": [0.0, 0], "low": [0.0, 0], "mid": [0.0, 0], "high": [0.0, 0]}
@@ -358,6 +386,10 @@ def train_diffusion(
             )
             for epoch in range(epochs):
                 epoch_start = time.monotonic()
+                if device.type == "cuda":
+                    # Reset per epoch so CUDA memory figures can be compared with
+                    # epoch timing instead of reporting one process-lifetime high.
+                    torch.cuda.reset_peak_memory_stats(device)
                 learning_rate = optimizer.param_groups[0]["lr"]
                 run.progress(phase="training", epoch=epoch + 1, batch=0,
                              batches=len(train_loader), force=True)
@@ -410,10 +442,16 @@ def train_diffusion(
                     )
                 proxy_curve.append(proxy)
 
+                cuda_peak_memory_mb = (
+                    torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+                    if device.type == "cuda" else None
+                )
+
                 progress.update(task, advance=1, epoch=epoch + 1,
                                 loss=average, val=metrics["val_loss"])
                 run.epoch({"epoch": epoch + 1, "train_loss": average, **metrics,
                            "control_mae": proxy, "learning_rate": learning_rate,
+                           "cuda_peak_memory_mb": cuda_peak_memory_mb,
                            "epoch_seconds": time.monotonic() - epoch_start,
                            "elapsed_seconds": time.monotonic() - run.started})
 

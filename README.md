@@ -473,9 +473,9 @@ can differ from a typical individual member.
 
 An alternative backend generates audio directly: a descriptor-conditioned 1-D
 U-Net denoises a waveform, with no VAE and no vocoder in the path. **It has
-never been trained.** The code, the commands and the tests exist so the
-experiment can be run; no checkpoint, benchmark or listening evidence does, and
-nothing in the API or the studio uses it.
+only experimental checkpoints and is not a served engine.** The first local
+hi-hat runs have measurements and prepared blind pairs, but no promotion
+decision; nothing in the API or the studio uses it.
 
 ```bash
 uv run kicks diffusion-train -i kick --model-dir models/experiments/diffusion \
@@ -501,7 +501,27 @@ hi-hat runs (September 2026) produce recognisable transients and sizzle over a
 residual noise floor; they are documented, unlistened blind, and not served.
 [`docs/waveform-diffusion.md`](docs/waveform-diffusion.md) has the design, the
 measurements, the budget table, the run results and the list of what has not
-been measured.
+been measured. [`docs/modal-training.md`](docs/modal-training.md) documents the
+review-gated, detached GPU wrapper, byte-for-byte corpus verification, locked
+container test, and note-preserving result sync.
+
+Remote diffusion training uses the standalone `scripts/modal_train.py` wrapper
+so Modal 1.5.5 does not share the project's protobuf 3.19 environment. The
+`kicks-corpus` volume intentionally stores only WAV files: 10,109 kicks, 7,994
+snares and 5,824 hi-hats. Remote verification compares every filename, size and
+SHA-256 digest with `data/corpus_ids.json`; it does not expect `SOURCES.md` on
+Modal. Keep `data/corpus_ids.json` and all three local `SOURCES.md` files—they
+are the durable source and license records after the numeric rename.
+
+```bash
+uv run --script scripts/modal_train.py check-local
+uv run --script scripts/modal_train.py verify --confirm-cloud
+uv run --script scripts/modal_train.py image-test --confirm-cloud
+uv run --script scripts/modal_train.py plan ...
+# After reviewing the printed plan:
+uv run --script scripts/modal_train.py launch --confirm-cloud ...
+uv run --script scripts/modal_train.py sync --confirm-cloud
+```
 
 </details>
 

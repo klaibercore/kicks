@@ -357,7 +357,8 @@ def test_loss_is_zero_for_a_perfect_denoiser_and_reports_per_sample_values():
     assert diffusion_loss(Oracle(), x, None, sigmas, noise, reduce=False).shape == (4,)
 
 
-def test_training_records_a_run_writes_checkpoints_and_reloads(tmp_path):
+def test_training_records_a_run_writes_checkpoints_and_reloads(tmp_path, monkeypatch):
+    monkeypatch.setenv("KICKS_TRAINING_CONTEXT", '{"provider":"test","job_id":"job-1"}')
     profile = scoped(tmp_path)
     dataset = WaveformDataset(str(corpus(tmp_path / "kicks", 12)), profile,
                               length=LENGTH, verbose=False)
@@ -380,17 +381,23 @@ def test_training_records_a_run_writes_checkpoints_and_reloads(tmp_path):
     assert run["config"]["backend"] == "waveform_diffusion"
     assert run["config"]["split_fingerprint"]
     assert run["config"]["effective_batch"] == 8
+    assert run["config"]["runtime"]["torch"] == torch.__version__
+    assert run["config"]["runtime"]["accelerator"]["name"] == "cpu"
+    assert run["config"]["execution"] == {"provider": "test", "job_id": "job-1"}
     # Nine training hits at batch 4 accumulate in pairs: the short third
     # micro-batch is dropped, so each epoch is exactly one optimizer step.
     assert run["config"]["train_samples"] == 9 and len(steps) == 2
     assert run["notes"]["objective"] == "cover the loop"
     assert len(run["history"]) == 3                       # epoch 0 baseline plus two
     assert run["history"][-1]["control_mae"] is not None
+    assert run["history"][-1]["cuda_peak_memory_mb"] is None
     assert {"val_loss_low_sigma", "val_loss_high_sigma"} <= set(run["history"][-1])
 
     for path in (profile.paths.diffusion_checkpoint, profile.paths.diffusion_final_checkpoint,
                  profile.paths.diffusion_control_checkpoint, profile.paths.diffusion_loss_curves):
         assert os.path.exists(path), path
+    # Checkpoints are written beside the target and renamed into place.
+    assert not [name for name in os.listdir(profile.paths.model_dir) if name.endswith(".tmp")]
 
     # The saved weights are the EMA, so reloading must not resurrect the live ones.
     reloaded, meta = load_diffusion_from_checkpoint(
