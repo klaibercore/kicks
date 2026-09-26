@@ -7,9 +7,10 @@
 
 The script deliberately runs outside the project's environment.  Modal needs a
 modern protobuf, while the locked Kicks environment contains protobuf 3.19.6
-for ``descript-audiotools``.  The remote image has the same split: Modal's
-runtime stays in its system environment and training runs in the uv-created
-``/.uv/.venv`` subprocess.
+for ``descript-audiotools``.  The remote image keeps the same split: training
+runs in the uv-created ``/.uv/.venv`` subprocess, and the image resets ``PATH``
+after ``uv_sync`` so Modal's runtime starts with the base image's interpreter
+rather than the venv's (it would otherwise import protobuf 3.19.6 and crash).
 
 Cloud-touching commands require ``--confirm-cloud``.  This is a guardrail, not
 an approval mechanism: review each printed plan before invoking that command.
@@ -45,6 +46,8 @@ CORPUS_MOUNT = Path("/corpus")
 RESULTS_MOUNT = Path("/results")
 REMOTE_WORKSPACE = Path("/workspace")
 PROJECT_PYTHON = Path("/.uv/.venv/bin/python")
+#: PATH of the official python:*-slim base image, without the project venv.
+SYSTEM_PATH = "/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 LOCAL_STATE = ROOT / "output" / "modal"
 RECEIPT = LOCAL_STATE / "corpus-verification.json"
 LAUNCHES = LOCAL_STATE / "launches"
@@ -404,6 +407,13 @@ def merge_downloaded_tree(staged: Path, destination: Path, *, preserve_notes: bo
     return copied
 
 
+def completed(value: Any, what: str) -> Any:
+    """Modal's ``app.run()`` swallows Ctrl-C and leaves its block normally; say so plainly."""
+    if value is None:
+        raise RuntimeError(f"interrupted before Modal returned {what}; nothing was recorded")
+    return value
+
+
 def require_cloud_confirmation(args: argparse.Namespace) -> None:
     if not args.confirm_cloud:
         raise ValueError("cloud command refused: review this step, then add --confirm-cloud")
@@ -419,6 +429,11 @@ if modal is not None:
         modal.Image.debian_slim(python_version="3.12")
         .apt_install("ffmpeg", "libsndfile1")
         .uv_sync(str(ROOT), groups=[], uv_version="0.11.7")
+        # uv_sync prepends /.uv/.venv/bin to PATH. Modal starts its own runtime
+        # with the first `python` on PATH, which would then import the venv's
+        # protobuf 3.19.6 and crash at container start. Restore the base image's
+        # PATH; training calls the venv's interpreter by absolute path.
+        .env({"PATH": SYSTEM_PATH})
         .add_local_dir(
             str(ROOT / "kicks"), str(REMOTE_WORKSPACE / "kicks"), copy=True,
             # Local bytecode changes on every test run and would force a rebuild.
@@ -452,6 +467,9 @@ if modal is not None:
     def test_training_image() -> dict[str, Any]:
         import google.protobuf
 
+        if Path(sys.prefix).resolve() == PROJECT_PYTHON.parent.parent.resolve():
+            raise RuntimeError(f"Modal's runtime is running inside the project venv ({sys.prefix})")
+
         program = (
             "import json, google.protobuf, torch; "
             "from kicks.nn import WaveformUNet; "
@@ -468,7 +486,8 @@ if modal is not None:
         project = json.loads(completed.stdout.strip().splitlines()[-1])
         if project["protobuf"] != "3.19.6":
             raise RuntimeError(f"locked project protobuf is {project['protobuf']}, expected 3.19.6")
-        return {"modal_runtime_protobuf": google.protobuf.__version__, "project": project}
+        return {"modal_runtime_python": sys.executable,
+                "modal_runtime_protobuf": google.protobuf.__version__, "project": project}
 
     @train_app.function(
         image=training_image,
@@ -587,8 +606,10 @@ def command_upload(args: argparse.Namespace) -> int:
 def command_verify(args: argparse.Namespace) -> int:
     require_cloud_confirmation(args)
     local = verify_corpus_tree(ROOT / "data", hash_files=True)
+    remote = None
     with modal.enable_output(), verify_app.run():
         remote = verify_uploaded_corpus.remote(local["mapping_sha256"])
+    remote = completed(remote, "the verification")
     receipt = {
         "verified_at": utc_now(), "volume": CORPUS_VOLUME_NAME,
         "mapping_sha256": local["mapping_sha256"], "local": local, "remote": remote,
@@ -600,9 +621,10 @@ def command_verify(args: argparse.Namespace) -> int:
 
 def command_image_test(args: argparse.Namespace) -> int:
     require_cloud_confirmation(args)
+    result = None
     with modal.enable_output(), image_app.run():
         result = test_training_image.remote()
-    result = {"tested_at": utc_now(), **result}
+    result = {"tested_at": utc_now(), **completed(result, "the image test")}
     atomic_json(LOCAL_STATE / "image-test.json", result)
     print(json.dumps(result, indent=2))
     return 0
@@ -644,11 +666,13 @@ def command_launch(args: argparse.Namespace) -> int:
         "verified_at": receipt["verified_at"],
         "mapping_sha256": receipt["mapping_sha256"],
     }
+    call_id = None
     with modal.enable_output(), train_app.run(name=f"kicks-{spec['job_id']}", detach=True):
         call = train_remote.with_options(
             gpu=spec["gpu"], memory=spec["memory_mib"], cpu=spec["cpu"],
         ).spawn(spec)
         call_id = call.object_id
+    call_id = completed(call_id, "a function call ID (check `modal app list`)")
     launch = {**spec, "function_call_id": call_id, "launched_at": utc_now()}
     atomic_json(LAUNCHES / f"{spec['job_id']}.json", launch)
     print(json.dumps(launch, indent=2))
