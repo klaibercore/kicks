@@ -185,6 +185,17 @@ def test_sync_merge_preserves_existing_local_notes(tmp_path):
     assert (local / "notes.js").read_text() == "local"
 
 
+def test_an_interrupted_cloud_call_reports_that_nothing_was_recorded():
+    assert modal_train.completed({"ok": True}, "x") == {"ok": True}
+    with pytest.raises(RuntimeError, match="interrupted before Modal returned the image test"):
+        modal_train.completed(None, "the image test")
+
+
+def test_the_runtime_path_excludes_the_project_venv():
+    assert str(modal_train.PROJECT_PYTHON.parent) not in modal_train.SYSTEM_PATH.split(":")
+    assert modal_train.SYSTEM_PATH.split(":")[0] == "/usr/local/bin"
+
+
 def test_cloud_commands_require_an_explicit_per_step_confirmation():
     with pytest.raises(ValueError, match="--confirm-cloud"):
         modal_train.require_cloud_confirmation(Namespace(confirm_cloud=False))

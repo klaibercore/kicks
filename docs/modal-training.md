@@ -2,8 +2,13 @@
 
 `scripts/modal_train.py` is a standalone uv script pinned to Modal 1.5.5. It
 does not add Modal to the project environment. The training image is built with
-uv 0.11.7 from the project's frozen `uv.lock`; Kicks runs in `/.uv/.venv` with protobuf 3.19.6,
-while Modal's container runtime remains in its separate system environment.
+uv 0.11.7 from the project's frozen `uv.lock`; Kicks runs in `/.uv/.venv` with protobuf 3.19.6.
+Modal's container runtime must not share that venv: `uv_sync` prepends
+`/.uv/.venv/bin` to `PATH`, Modal starts its runtime with the first `python` on
+`PATH`, and the runtime then crashes importing protobuf 3.19.6 (the first
+image test on 2026-09-26 crash-looped on exactly this). The image therefore
+resets `PATH` to the base image's value after `uv_sync`, and the trainer is
+started through the venv's interpreter by absolute path.
 
 Every command that contacts Modal requires `--confirm-cloud`. Run and review
 one step at a time. `plan` and `check-local` are local-only.
@@ -54,9 +59,15 @@ subset manifests; and writes `output/modal/local-corpus.json`.
    uv run --script scripts/modal_train.py image-test --confirm-cloud
    ```
 
-   This imports Modal in its runtime environment, then starts the locked Kicks
-   subprocess, asserts protobuf 3.19.6, imports Torch, and constructs a small
-   waveform denoiser. It writes `output/modal/image-test.json`.
+   This starts Modal's runtime, checks that it is not running inside the
+   project venv, then starts the locked Kicks subprocess, asserts protobuf
+   3.19.6, imports Torch, and constructs a small waveform denoiser. It writes
+   `output/modal/image-test.json`.
+
+   Watch the first seconds: a container that crashes at start makes Modal retry
+   it repeatedly, and the local command waits. If the log shows
+   `Runner failed with exit code`, press Ctrl-C; the ephemeral app stops and
+   the command reports that nothing was recorded.
 
 3. Print the exact smoke plan locally and review it:
 
