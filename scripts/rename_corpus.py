@@ -22,11 +22,13 @@ Artifacts that refer to hits by name are translated in the same pass:
 
 Historical evidence is left as recorded: fidelity, calibration and listening
 reports keep the old names in their ``hits`` lists — look them up in the
-mapping. The new names also sort differently, so a run's recorded split cannot
-be reproduced on the renamed corpus (``--run`` warns and falls back), a subset
-drawn after the rename does not nest with the ones drawn before it, and
-fingerprinted caches (eval references, calibration sidecars) rebuild on first
-use.
+mapping. Split fingerprints cover file paths, so ``--run`` warns and falls
+back for every run recorded before the rename, and fingerprinted caches (eval
+references, calibration sidecars) rebuild on first use. The splits themselves
+survive wherever the sort order does: snare and hi-hat numbers all have five
+digits, so they sort exactly like the old names — the same seed gives the same
+split, and new subsets nest with the old ones. Kick numbers span one to five
+digits (``#1``, ``#10``, ``#100``…), so the kick corpus reorders.
 
 Dry run by default; ``--apply`` renames, ``--undo`` reverses.
 """
