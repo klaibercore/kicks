@@ -187,6 +187,76 @@ def test_sync_merge_preserves_existing_local_notes(tmp_path):
     assert (local / "notes.js").read_text() == "local"
 
 
+class FakeVolume:
+    """Modal's Volume read API over a dict: relative paths, FILE/DIRECTORY entries."""
+
+    def __init__(self, files: dict[str, bytes]):
+        self.files = files
+
+    def listdir(self, path, recursive=False):
+        prefix = path.strip("/") + "/"
+        found = {}
+        for name in self.files:
+            if not name.startswith(prefix):
+                continue
+            rest = name[len(prefix):]
+            if recursive:
+                found[name] = "FILE"
+            else:
+                head = rest.split("/", 1)[0]
+                found[prefix + head] = "FILE" if "/" not in rest else "DIRECTORY"
+        if not found:
+            raise FileNotFoundError(path)
+        return [Namespace(path=p, type=Namespace(name=t)) for p, t in sorted(found.items())]
+
+    def read_file(self, path):
+        if path not in self.files:
+            raise FileNotFoundError(path)
+        yield self.files[path]
+
+
+def _run(job_id, epochs):
+    history = [{"epoch": e, "val_loss": 0.5 / (e + 1)} for e in range(epochs)]
+    return json.dumps({"config": {"execution": {"job_id": job_id}}, "history": history}).encode()
+
+
+def test_live_sync_mirrors_only_the_jobs_run_record_and_keeps_local_notes(tmp_path):
+    volume = FakeVolume({
+        "output/training/r-other/run.json": _run("other-job", 3),
+        "output/training/r-job/run.json": _run("j1", 3),
+        "output/training/r-job/notes.json": b'{"observations": "remote"}',
+        "output/modal/jobs/j1.json": b'{"status": "running"}',
+        "models/experiments/x/hihat/diffusion_best.pth": b"weights",
+    })
+    destination = tmp_path / "training"
+    (destination / "r-job").mkdir(parents=True)
+    (destination / "r-job/notes.json").write_text('{"observations": "local"}')
+    state = {}
+
+    info = modal_train.live_sync_once(volume, "j1", state, destination)
+    assert info == {"status": "running", "run_dir": "r-job", "epoch": 2, "val_loss": 0.5 / 3}
+    assert sorted(p.name for p in destination.iterdir()) == ["r-job"]           # nothing else
+    assert "local" in (destination / "r-job/notes.json").read_text()
+    assert not list(tmp_path.rglob("*.pth"))                                    # no checkpoints
+
+    volume.files["output/training/r-job/run.json"] = _run("j1", 7)
+    volume.files["output/modal/jobs/j1.json"] = b'{"status": "completed"}'
+    info = modal_train.live_sync_once(volume, "j1", state, destination)
+    assert (info["status"], info["epoch"]) == ("completed", 6)
+    assert info["status"] in modal_train.TERMINAL_JOB_STATES
+
+
+def test_live_sync_waits_for_a_job_that_has_not_committed_yet(tmp_path):
+    state = {}
+    info = modal_train.live_sync_once(FakeVolume({"output/other": b"x"}), "j1", state, tmp_path)
+    assert info == {"status": "waiting", "run_dir": None, "epoch": None, "val_loss": None}
+    # A run whose record is not committed yet is looked at again on the next pass.
+    volume = FakeVolume({"output/training/r-job/data.js": b""})
+    assert modal_train.find_job_run(volume, "j1", state.setdefault("known", {})) is None
+    volume.files["output/training/r-job/run.json"] = _run("j1", 1)
+    assert modal_train.find_job_run(volume, "j1", state["known"]) == "r-job"
+
+
 def test_an_interrupted_cloud_call_reports_that_nothing_was_recorded():
     assert modal_train.completed({"ok": True}, "x") == {"ok": True}
     with pytest.raises(RuntimeError, match="interrupted before Modal returned the image test"):

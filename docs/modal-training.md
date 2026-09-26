@@ -114,7 +114,22 @@ subset manifests; and writes `output/modal/local-corpus.json`.
    reviewed launch with `--resume`. The 24-hour function timeout is Modal's
    ceiling: size longer work as resumable chunks.
 
-5. After the run finishes (or for a dashboard snapshot), review and run:
+5. To watch a running job in the local dashboard, start `uv run kicks dashboard`
+   and mirror the job's run record while it trains:
+
+   ```bash
+   uv run --script scripts/modal_train.py live --confirm-cloud --job-id JOB_ID --final-sync
+   ```
+
+   Each poll (every 30 s, `--interval`) reads the job's status and copies only
+   that run's record files — a few KB, never checkpoints — into
+   `output/training`, keeping local notes. The dashboard lags the job by the
+   launch's `--commit-interval-seconds` plus one poll, so launch long runs you
+   want to watch with a shorter interval (for example 60). `live` only reads
+   the results volume; it starts no compute, and Ctrl-C leaves the job running.
+   `--final-sync` pulls the checkpoints once the job ends.
+
+6. After the run finishes (or for a dashboard snapshot), review and run:
 
    ```bash
    uv run --script scripts/modal_train.py sync --confirm-cloud

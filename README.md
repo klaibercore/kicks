@@ -520,6 +520,8 @@ uv run --script scripts/modal_train.py image-test --confirm-cloud
 uv run --script scripts/modal_train.py plan ...
 # After reviewing the printed plan:
 uv run --script scripts/modal_train.py launch --confirm-cloud ...
+# Watch it in `uv run kicks dashboard` (run records only, read-only):
+uv run --script scripts/modal_train.py live --confirm-cloud --job-id JOB_ID --final-sync
 uv run --script scripts/modal_train.py sync --confirm-cloud
 ```
 
