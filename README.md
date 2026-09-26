@@ -191,14 +191,24 @@ environment settings still take precedence.
 
 ### Watch the detail, not just the loss
 
-The dashboard refreshes every three seconds and includes **exact-value hover,
-optional smoothing, epoch ranges, two-run comparisons, JSON export and editable
-notes**. Its Evidence tab collects fidelity, controls and promotion reports, and
-its **Listening lab** plays the blind A/B pairs of any fidelity report — whole
-hit or 2 kHz+ band, with waveform and spectrogram views — and saves your
-verdicts next to the report so the tally survives a reload. It follows the
-system colour scheme, with a light/dark switch in the sidebar; colour is
-reserved for data series and instruments, everything else is ink.
+The dashboard refreshes every three seconds. The top of each run is its
+**learning-rate schedule track**: where the run is in its schedule, the time
+left and the best validation epoch. Below it, **one panel per metric, one line
+per run**, with up to two comparison runs, each keeping its own colour and line
+style. Losses use a log scale by default and rates and times start at zero; each
+panel switches between log and linear. An untrained epoch-0 baseline far above
+the rest is clipped and labelled rather than flattening the curve. The
+horizontal axis can be epochs, optimizer steps, hits seen or wall-clock time, so
+runs on corpora of different sizes compare fairly. Hovering one panel moves a
+crosshair across all of them; smoothing is a debiased moving average drawn over
+the faint raw series, which stays in the record and the table. The run list shows
+a validation sparkline per run. Its Evidence tab collects fidelity, controls and
+promotion reports, and its **Listening lab** plays the blind A/B pairs of any
+fidelity report — whole hit or 2 kHz+ band, with waveform and spectrogram views
+— and saves your verdicts next to the report so the tally survives a reload. It
+follows the system colour scheme, with a light/dark switch in the sidebar;
+colour marks which run a line belongs to, and status colours always sit next to
+a label.
 
 | Signal | What it tells you |
 |:---|:---|

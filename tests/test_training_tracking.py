@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 
 from kicks.instruments import get_profile
 from kicks.training.metrics import DetailMetrics
-from kicks.training.tracking import TrainingRun, dashboard_server, read_run
+from kicks.training.tracking import TrainingRun, dashboard_server, read_run, validation_trend
 from kicks.training.trainer import train
 
 
@@ -215,6 +215,8 @@ def test_listening_lab_serves_reports_allow_listed_audio_and_records_verdicts(tm
 
     try:
         assert get("/api/capabilities")["listening"] is True
+        assert get("/api/capabilities")["trend"] is True
+        assert [row["trend"] for row in get("/api/runs")["runs"]] == [[]]  # no epochs yet
         # Both discovery sources appear; the unparsable directory does not.
         reports = {entry["slug"]: entry for entry in get("/api/fidelity")["reports"]}
         assert set(reports) == {"demo", "custom-out"}
@@ -266,3 +268,14 @@ def test_listening_lab_serves_reports_allow_listed_audio_and_records_verdicts(tm
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def test_validation_trend_keeps_the_ends_and_thins_evenly():
+    history = [{"epoch": e, "val_loss": 1.0 / (e + 1)} for e in range(201)]
+    history.insert(5, {"epoch": 4.5, "val_loss": float("nan")})
+    history.insert(9, {"epoch": 8.5})
+    trend = validation_trend(history, points=48)
+    assert len(trend) == 48
+    assert trend[0] == 1.0 and trend[-1] == 1.0 / 201
+    assert trend == sorted(trend, reverse=True)
+    assert validation_trend(history[:4]) == [1.0, 0.5, 1.0 / 3, 0.25]

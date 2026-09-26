@@ -528,13 +528,13 @@ def test_the_dashboard_template_switches_on_the_backend():
     template = (pathlib.Path("kicks/training/tracking.py").parent / "dashboard.html").read_text()
 
     assert "waveform_diffusion" in template
-    # Every element the backend switch retargets must still exist to be retargeted.
-    for element in ("airLabel", "latentLabel", "detailTitle", "detailCaption",
-                    "latentTitle", "latentCaption", "lossCaption", "epochHead", "scope"):
+    # Each backend has its own metric registry; panels are built from it.
+    assert "DIFFUSION_METRICS" in template and "VAE_METRICS" in template
+    for element in ("panels", "epochHead", "scope", "trackPlot"):
         assert f'id="{element}"' in template, element
     for metric in ("val_loss_low_sigma", "val_loss_mid_sigma", "val_loss_high_sigma",
-                   "control_mae"):
-        assert metric in template, metric
+                   "control_mae", "air_mae_db", "active_dims"):
+        assert f"key:'{metric}'" in template, metric
     # A VAE run and a diffusion run must not be offered as a like-for-like compare.
     assert "'instrument','backend','objective'" in template
 

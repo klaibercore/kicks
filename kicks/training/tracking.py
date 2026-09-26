@@ -339,6 +339,20 @@ def track_training(function):
     return wrapped
 
 
+def validation_trend(history: list, points: int = 48) -> list:
+    """Validation loss for the run list's sparkline, evenly thinned to ``points`` values.
+
+    The first and last recorded values are always kept, so the sparkline starts at
+    the baseline and ends at the latest epoch.
+    """
+    values = [row["val_loss"] for row in history
+              if isinstance(row.get("val_loss"), (int, float)) and math.isfinite(row["val_loss"])]
+    if len(values) <= points:
+        return values
+    step = (len(values) - 1) / (points - 1)
+    return [values[round(i * step)] for i in range(points)]
+
+
 def dashboard_server(root: Path, port=6060) -> ThreadingHTTPServer:
     """Serve records and prose edits on loopback; never expose arbitrary files."""
     root = root.resolve()
@@ -384,7 +398,8 @@ def dashboard_server(root: Path, port=6060) -> ThreadingHTTPServer:
                 if parts == [""] or parts == ["index.html"]:
                     return self.reply(200, TEMPLATE.read_text(), "text/html")
                 if parts == ["api", "capabilities"]:
-                    return self.reply(200, {"viewer": 2, "listening": True, "instruments": True})
+                    return self.reply(200, {"viewer": 3, "listening": True, "instruments": True,
+                                            "trend": True})
                 if parts == ["api", "fidelity"]:
                     rows = [fidelity_summary(read_fidelity(directory)["report"], directory)
                             for directory in fidelity_dirs(root).values()]
@@ -423,7 +438,7 @@ def dashboard_server(root: Path, port=6060) -> ThreadingHTTPServer:
                     for directory in root.iterdir():
                         try:
                             row = read_run(self.directory(directory.name))
-                            row.pop("history", None)
+                            row["trend"] = validation_trend(row.pop("history", None) or [])
                             records.append(row)
                         except (OSError, ValueError):
                             continue
