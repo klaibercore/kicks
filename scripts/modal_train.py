@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
@@ -575,6 +576,59 @@ def download_volume_tree(volume: Any, remote_prefix: str, destination: Path) -> 
     return count
 
 
+TERMINAL_JOB_STATES = {"completed", "failed", "refused"}
+
+
+def read_volume_json(volume: Any, path: str) -> dict[str, Any] | None:
+    """A JSON file from a volume, or None until the job's first commit writes it."""
+    try:
+        return json.loads(b"".join(volume.read_file(path)))
+    except Exception:  # noqa: BLE001 - absent, or not yet committed
+        return None
+
+
+def find_job_run(volume: Any, job_id: str, known: dict[str, str | None]) -> str | None:
+    """The run directory whose record names ``job_id``.
+
+    The trainer picks the run ID, so the wrapper finds it by reading each new
+    run's ``config.execution.job_id``. ``known`` caches decided directories; a
+    run whose record is not committed yet is looked at again next time.
+    """
+    try:
+        entries = volume.listdir("output/training")
+    except Exception:  # noqa: BLE001 - the directory appears with the first run
+        return None
+    for entry in entries:
+        name = PurePosixPath(entry.path).name
+        if name in known:
+            continue
+        run = read_volume_json(volume, f"output/training/{name}/run.json")
+        if run is not None:
+            known[name] = run.get("config", {}).get("execution", {}).get("job_id")
+    return next((name for name, job in known.items() if job == job_id), None)
+
+
+def live_sync_once(volume: Any, job_id: str, state: dict[str, Any], destination: Path) -> dict[str, Any]:
+    """One polling pass: the job's status and its run record, never checkpoints."""
+    job = read_volume_json(volume, f"output/modal/jobs/{job_id}.json")
+    run_dir = state.get("run_dir") or find_job_run(volume, job_id, state.setdefault("known", {}))
+    state["run_dir"] = run_dir
+    info = {"status": (job or {}).get("status", "waiting"), "run_dir": run_dir,
+            "epoch": None, "val_loss": None}
+    if run_dir:
+        with tempfile.TemporaryDirectory(prefix="kicks-modal-live-") as temporary:
+            staged = Path(temporary)
+            download_volume_tree(volume, f"output/training/{run_dir}", staged / run_dir)
+            merge_downloaded_tree(staged, destination, preserve_notes=True)
+        try:
+            history = json.loads((destination / run_dir / "run.json").read_text()).get("history") or []
+        except (OSError, ValueError):
+            history = []
+        if history:
+            info.update(epoch=history[-1].get("epoch"), val_loss=history[-1].get("val_loss"))
+    return info
+
+
 def command_check_local(args: argparse.Namespace) -> int:
     result = verify_corpus_tree(ROOT / "data", hash_files=not args.sizes_only)
     for manifest in sorted((ROOT / "data/_subsets").glob("*/manifest.json")):
@@ -737,6 +791,45 @@ def command_sync(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_live(args: argparse.Namespace) -> int:
+    """Mirror one job's run record into the local dashboard until the job ends."""
+    require_cloud_confirmation(args)
+    if args.interval < 10:
+        raise ValueError("--interval must be at least 10 seconds")
+    volume = modal.Volume.from_name(RESULTS_VOLUME_NAME, create_if_missing=False)
+    state: dict[str, Any] = {}
+    deadline = time.monotonic() + args.max_minutes * 60
+    last_line = announced = None
+    try:
+        while True:
+            info = live_sync_once(volume, args.job_id, state, ROOT / "output/training")
+            if info["run_dir"] and info["run_dir"] != announced:
+                announced = info["run_dir"]
+                print(f"dashboard: http://127.0.0.1:6060/?run={announced}  (start it with `uv run kicks dashboard`)",
+                      flush=True)
+            line = f"job {args.job_id}: {info['status']}"
+            if info["epoch"] is not None:
+                line += f", epoch {info['epoch']}"
+                if isinstance(info["val_loss"], (int, float)):
+                    line += f", val {info['val_loss']:.4f}"
+            if line != last_line:
+                print(f"[{utc_now()}] {line}", flush=True)
+                last_line = line
+            if info["status"] in TERMINAL_JOB_STATES:
+                break
+            if time.monotonic() > deadline:
+                print("watch limit reached; the job continues on Modal", flush=True)
+                return 0
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print("stopped watching; the job continues on Modal", flush=True)
+        return 0
+    if args.final_sync:
+        return command_sync(argparse.Namespace(confirm_cloud=True, job_id=args.job_id, all=False))
+    print(f"job ended; pull its checkpoints with `sync --confirm-cloud --job-id {args.job_id}`", flush=True)
+    return 0
+
+
 def add_cloud_confirmation(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--confirm-cloud", action="store_true",
@@ -797,6 +890,15 @@ def parser() -> argparse.ArgumentParser:
     sync.add_argument("--job-id")
     sync.add_argument("--all", action="store_true", help="sync model artifacts for every recorded launch")
     sync.set_defaults(handler=command_sync)
+    live = commands.add_parser(
+        "live", help="mirror a running job's run record into the local dashboard (read-only, no checkpoints)",
+    )
+    add_cloud_confirmation(live)
+    live.add_argument("--job-id", required=True)
+    live.add_argument("--interval", type=int, default=30, help="seconds between polls (at least 10)")
+    live.add_argument("--max-minutes", type=int, default=25 * 60, help="stop watching after this long")
+    live.add_argument("--final-sync", action="store_true", help="pull the checkpoints once the job ends")
+    live.set_defaults(handler=command_live)
     return root
 
 

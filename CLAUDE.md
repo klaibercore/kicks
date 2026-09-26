@@ -56,7 +56,9 @@ For remote waveform-diffusion work, follow `docs/modal-training.md`. Each cloud
 operation is a separate review gate. `plan` is local-only; `launch` is detached
 and must have a current `output/modal/corpus-verification.json` receipt. Corpus
 data is mounted read-only and results are written to `kicks-training`; `sync`
-preserves existing local `notes.json` and `notes.js`.
+preserves existing local `notes.json` and `notes.js`. `live` mirrors one job's
+run record into the local dashboard while it trains (read-only, no checkpoints);
+its lag is the launch's `--commit-interval-seconds` plus one poll.
 
 ### Before training
 
