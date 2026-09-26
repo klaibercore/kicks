@@ -48,11 +48,15 @@ comparable runs, then pass `--run-name`, `--intent`, `--hypothesis` and
 `--success-criteria` to `kicks train`. Each invocation creates a unique record
 under `output/training/` (override with `--runs-dir` or `KICKS_RUNS_DIR`).
 
-The viewer updates every three seconds, compares two runs and supports hover
-inspection, epoch ranges, optional trend smoothing, JSON export and a notebook.
-Metrics remain raw in the record and hover readout when smoothing is enabled.
-Standalone `index.html` files also update from sibling data scripts; editing
-notes and comparing runs use the local HTTP viewer. No CDN or account is needed.
+The viewer updates every three seconds, draws one panel per metric with up to
+two comparison runs, and supports a synchronised hover crosshair, epoch ranges,
+log or linear scales, an epoch / optimizer-step / hits-seen / time horizontal
+axis, optional debiased smoothing, JSON export and a notebook. Metrics remain
+raw in the record and the table when smoothing is enabled. Standalone
+`index.html` files also update from sibling data scripts; editing notes and
+comparing runs use the local HTTP viewer. The page loads its typeface from
+Google Fonts when online and falls back to system fonts offline; no account is
+needed.
 
 Before training, complete **Objective**, **Hypothesis** and **Success criteria**.
 During training, update **Observations** with epoch references, trends and

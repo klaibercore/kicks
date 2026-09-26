@@ -158,7 +158,7 @@ Default root: `<KICKS_OUTPUT_DIR>/training` (normally `output/training`). Overri
 | `notes.json`, `notes.js` | Prose is separate so telemetry cannot overwrite browser edits |
 | `reports.json`, `reports.js` | Attached evidence summaries, identities and local report paths |
 | `index.html` | Standalone live read-only view using sibling scripts |
-| `GET /api/runs` | List run summaries |
+| `GET /api/runs` | List run summaries, each with a `trend`: validation loss thinned to at most 48 points for the run-list sparkline |
 | `GET /api/runs/<id>` | Full run, notebook and evidence |
 | `POST /api/runs/<id>/notes` | Partial JSON update of string-valued notebook fields |
 | `GET /api/capabilities` | Viewer version and feature flags; the template degrades to charts-only against an older server |
