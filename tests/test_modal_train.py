@@ -88,11 +88,13 @@ def test_build_spec_rejects_empty_tracking_and_unsafe_job_id(monkeypatch):
         instrument="hihat", gpu="L4", run_name="Smoke", intent="Intent",
         hypothesis="Hypothesis", success_criteria="Criteria",
         model_dir="models/experiments/smoke", resume=None, subset_manifest=None,
-        job_id="safe-job", training_args=[], memory_gib=16, cpu=4,
+        job_id="safe-job", training_args=[], memory_gib=16, cpu=4, commit_interval_seconds=300,
     )
     spec = modal_train.build_spec(Namespace(**base))
     assert spec["job_id"] == "safe-job"
-    assert (spec["memory_mib"], spec["cpu"]) == (16 * 1024, 4.0)
+    assert (spec["memory_mib"], spec["cpu"], spec["commit_interval_seconds"]) == (16 * 1024, 4.0, 300)
+    with pytest.raises(ValueError, match="commit-interval"):
+        modal_train.build_spec(Namespace(**{**base, "commit_interval_seconds": 5}))
     with pytest.raises(ValueError, match="cannot be empty"):
         modal_train.build_spec(Namespace(**{**base, "hypothesis": " "}))
     for job_id in ("../escape", None, ""):

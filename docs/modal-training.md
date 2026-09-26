@@ -97,7 +97,10 @@ subset manifests; and writes `output/modal/local-corpus.json`.
    separate `kicks-training` volume.
 
    While the trainer runs, the wrapper commits `kicks-training` every five
-   minutes. Modal commits a volume by itself only when the container exits, so
+   minutes (`--commit-interval-seconds`, 30–3600; a short run needs a shorter
+   interval for a mid-run `sync` to see anything). Each job gets its own
+   container (`single_use_containers`), which shuts down when training ends
+   instead of idling until scale-down. Modal commits a volume by itself only when the container exits, so
    without this a mid-run `sync` would see nothing and a hard kill (timeout,
    OOM, preemption) would lose the run's checkpoints. Checkpoints are written to
    a temporary file and renamed, so a commit never captures half a checkpoint;

@@ -267,6 +267,8 @@ def build_spec(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--memory-gib must be between 4 and 128")
     if not 1 <= args.cpu <= 16:
         raise ValueError("--cpu must be between 1 and 16")
+    if not 30 <= args.commit_interval_seconds <= 3600:
+        raise ValueError("--commit-interval-seconds must be between 30 and 3600")
     return {
         "job_id": job_id,
         "created_at": utc_now(),
@@ -275,6 +277,7 @@ def build_spec(args: argparse.Namespace) -> dict[str, Any]:
         "gpu": args.gpu,
         "memory_mib": int(args.memory_gib * 1024),
         "cpu": float(args.cpu),
+        "commit_interval_seconds": int(args.commit_interval_seconds),
         "run_name": args.run_name.strip(),
         "intent": args.intent.strip(),
         "hypothesis": args.hypothesis.strip(),
@@ -498,6 +501,10 @@ if modal is not None:
         timeout=86_400,
         memory=DEFAULT_MEMORY_GIB * 1024,
         cpu=DEFAULT_CPU,
+        # One job per container: without this a detached app keeps the GPU
+        # container idle until scale-down after training ends (~2 min billed
+        # on the first smoke run), and a later job could reuse its /tmp.
+        single_use_containers=True,
     )
     def train_remote(spec: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -529,6 +536,7 @@ if modal is not None:
         try:
             returncode = run_with_commits(
                 command, cwd=REMOTE_WORKSPACE, env=environment, commit=results_volume.commit,
+                interval=spec.get("commit_interval_seconds", COMMIT_INTERVAL_SECONDS),
             )
             if returncode:
                 raise subprocess.CalledProcessError(returncode, command)
@@ -650,7 +658,8 @@ def command_plan(args: argparse.Namespace) -> int:
         "results_volume": RESULTS_VOLUME_NAME,
         "resources": {
             "gpu": spec["gpu"], "memory_mib": spec["memory_mib"], "cpu": spec["cpu"],
-            "timeout_hours": 24, "commit_interval_seconds": COMMIT_INTERVAL_SECONDS,
+            "timeout_hours": 24, "commit_interval_seconds": spec["commit_interval_seconds"],
+            "single_use_container": True,
         },
         "spec": spec,
         "remote_command": remote_training_command(spec, remote_data_dir(spec)),
@@ -752,6 +761,8 @@ def add_training_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--memory-gib", type=float, default=DEFAULT_MEMORY_GIB,
                         help="container memory reservation (billed even when unused)")
     parser.add_argument("--cpu", type=float, default=DEFAULT_CPU, help="reserved CPU cores")
+    parser.add_argument("--commit-interval-seconds", type=int, default=COMMIT_INTERVAL_SECONDS,
+                        help="seconds between results-volume commits while training (30-3600)")
     parser.add_argument(
         "training_args", nargs=argparse.REMAINDER,
         help="additional diffusion-train flags after --; wrapper-owned flags are rejected",
