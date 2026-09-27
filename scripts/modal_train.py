@@ -800,9 +800,27 @@ def command_live(args: argparse.Namespace) -> int:
     state: dict[str, Any] = {}
     deadline = time.monotonic() + args.max_minutes * 60
     last_line = announced = None
+    failing_since = None
     try:
         while True:
-            info = live_sync_once(volume, args.job_id, state, ROOT / "output/training")
+            try:
+                info = live_sync_once(volume, args.job_id, state, ROOT / "output/training")
+            except Exception as error:  # noqa: BLE001 - network drops (sleep, Wi-Fi) are transient
+                # A dropped connection must not end the watch: the job keeps
+                # running on Modal, and the next poll usually succeeds.
+                if failing_since is None:
+                    failing_since = time.monotonic()
+                    print(f"[{utc_now()}] poll failed ({type(error).__name__}: {error}); retrying",
+                          flush=True)
+                if time.monotonic() > deadline:
+                    print("watch limit reached; the job continues on Modal", flush=True)
+                    return 0
+                time.sleep(args.interval)
+                continue
+            if failing_since is not None:
+                print(f"[{utc_now()}] connection back after {time.monotonic() - failing_since:.0f} s",
+                      flush=True)
+                failing_since = None
             if info["run_dir"] and info["run_dir"] != announced:
                 announced = info["run_dir"]
                 print(f"dashboard: http://127.0.0.1:6060/?run={announced}  (start it with `uv run kicks dashboard`)",

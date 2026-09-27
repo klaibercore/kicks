@@ -257,6 +257,25 @@ def test_live_sync_waits_for_a_job_that_has_not_committed_yet(tmp_path):
     assert modal_train.find_job_run(volume, "j1", state["known"]) == "r-job"
 
 
+def test_live_keeps_watching_through_a_network_drop(tmp_path, monkeypatch, capsys):
+    calls = []
+
+    def flaky(volume, job_id, state, destination):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("nodename nor servname provided, or not known")
+        return {"status": "completed", "run_dir": None, "epoch": None, "val_loss": None}
+
+    monkeypatch.setattr(modal_train, "live_sync_once", flaky)
+    monkeypatch.setattr(modal_train, "modal", Namespace(Volume=Namespace(from_name=lambda *a, **k: object())))
+    monkeypatch.setattr(modal_train.time, "sleep", lambda seconds: None)
+    args = Namespace(confirm_cloud=True, job_id="j1", interval=10, max_minutes=5, final_sync=False)
+    assert modal_train.command_live(args) == 0
+    out = capsys.readouterr().out
+    assert len(calls) == 2
+    assert "poll failed (OSError" in out and "connection back" in out and "job ended" in out
+
+
 def test_an_interrupted_cloud_call_reports_that_nothing_was_recorded():
     assert modal_train.completed({"ok": True}, "x") == {"ok": True}
     with pytest.raises(RuntimeError, match="interrupted before Modal returned the image test"):
