@@ -1,5 +1,6 @@
 import { config } from "@/lib/config";
 import type {
+  Backend,
   Evaluation,
   Health,
   InstrumentConfig,
@@ -24,6 +25,11 @@ export type TokenProvider = () => Promise<string | null>;
 export function soundQuery(sound: Sound): string {
   const params = new URLSearchParams();
   params.set("instrument", sound.instrument);
+  // The VAE stays implicit so existing presets keep their cache keys.
+  if (sound.backend === "diffusion") {
+    params.set("backend", "diffusion");
+    if (sound.steps) params.set("steps", String(sound.steps));
+  }
   if (sound.seed) params.set("seed", String(sound.seed));
   for (const key of Object.keys(sound.sliders).sort()) {
     params.set(key, sound.sliders[key].toFixed(3));
@@ -75,17 +81,18 @@ export class KicksApi {
     return this.json<InstrumentsResponse>("/instruments");
   }
 
-  config(instrument: string) {
-    return this.json<InstrumentConfig>(`/config?instrument=${encodeURIComponent(instrument)}`);
+  config(instrument: string, backend: Backend = "vae") {
+    const query = `instrument=${encodeURIComponent(instrument)}${backend === "diffusion" ? "&backend=diffusion" : ""}`;
+    return this.json<InstrumentConfig>(`/config?${query}`);
   }
 
   me() {
     return this.json<Me>("/me");
   }
 
-  /** Preview render: raw WAV bytes. Free, cached server-side. */
-  async generate(sound: Sound): Promise<ArrayBuffer> {
-    const res = await this.request(`/generate?${soundQuery(sound)}`);
+  /** Preview render: raw WAV bytes. Free, cached server-side. Aborting drops a queued diffusion render. */
+  async generate(sound: Sound, signal?: AbortSignal): Promise<ArrayBuffer> {
+    const res = await this.request(`/generate?${soundQuery(sound)}`, { signal });
     return res.arrayBuffer();
   }
 

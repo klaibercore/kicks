@@ -5,22 +5,28 @@ Instruments are loaded lazily and kept, so a server started for kicks can serve
 snares on request without a restart — at the cost of one model's memory each.
 Vocoders are cached by backend and weights directory, so two instruments that
 agree on a backend share one copy.
+
+The waveform diffusion backend is served beside the VAE, never instead of it,
+and only for the instruments given a checkpoint (``kicks serve --diffusion
+hihat=PATH``, i.e. ``KICKS_DIFFUSION``). It needs no vocoder and no slider
+basis; its sliders map onto the checkpoint's own label bank.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
 from ..analysis.basis import SliderBasis
 from ..analysis.descriptors import DecoderResponse
 from ..analysis.evaluation import Reference, build_reference
-from ..config import get_device, load_vae_from_checkpoint
+from ..config import get_device, load_diffusion_from_checkpoint, load_vae_from_checkpoint
 from ..data import DrumDataset
 from ..instruments import DEFAULT_INSTRUMENT, InstrumentProfile, get_profile
-from ..nn import VAE
+from ..nn import VAE, WaveformUNet
 from ..audio.vocoder import load_vocoder, resolve_vocoder_type
 from ..synthesis.controlled import fit_control_basis
 
@@ -47,6 +53,44 @@ class InstrumentState:
         return DecoderResponse(self.model, self.profile)
 
 
+@dataclass
+class DiffusionState:
+    """A served waveform diffusion checkpoint for one instrument."""
+
+    profile: InstrumentProfile
+    model: WaveformUNet
+    checkpoint: str
+    meta: dict
+    data_dir: str
+    eval_ref: Reference | None = None
+    #: One sampling walk at a time: renders run off the event loop, and two
+    #: concurrent walks would only share the device and both finish later.
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    def reference(self) -> Reference:
+        if self.eval_ref is None:
+            self.eval_ref = build_reference(self.data_dir, self.profile)
+        return self.eval_ref
+
+    @property
+    def names(self) -> list[str]:
+        """Slider labels, one per conditioning descriptor, in checkpoint order."""
+        return [d.label for d in self.profile.descriptors]
+
+
+def parse_diffusion_checkpoints(spec: str | None) -> dict[str, str]:
+    """``"hihat=a.pth,snare=b.pth"`` -> ``{"hihat": "a.pth", "snare": "b.pth"}``."""
+    served: dict[str, str] = {}
+    for item in (spec or "").split(","):
+        if not item.strip():
+            continue
+        name, sep, path = item.partition("=")
+        if not sep or not name.strip() or not path.strip():
+            raise ValueError(f"expected INSTRUMENT=PATH, got {item.strip()!r}")
+        served[get_profile(name.strip()).name] = path.strip()
+    return served
+
+
 class ServerState:
     """Process-wide synthesis state, populated during the app lifespan."""
 
@@ -58,6 +102,9 @@ class ServerState:
         self.default_instrument: str = DEFAULT_INSTRUMENT
         self._instruments: dict[str, InstrumentState] = {}
         self._vocoders: dict[tuple[str, str | None], object] = {}
+        #: Instrument -> diffusion checkpoint served beside its VAE.
+        self.diffusion_checkpoints: dict[str, str] = {}
+        self._diffusion: dict[str, DiffusionState] = {}
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -74,8 +121,15 @@ class ServerState:
         self.control_basis = control_basis or os.environ.get("KICKS_CONTROL", "descriptor")
         if self.control_basis not in ("pca", "descriptor"):
             raise ValueError("KICKS_CONTROL must be 'descriptor' or 'pca'")
+        self.diffusion_checkpoints = parse_diffusion_checkpoints(os.environ.get("KICKS_DIFFUSION"))
+        for name, path in self.diffusion_checkpoints.items():
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"diffusion checkpoint for {name} not found: {path}")
         profile = get_profile(instrument)
         self.default_instrument = profile.name
+        if not os.path.exists(profile.paths.checkpoint) and profile.name in self.diffusion_checkpoints:
+            # A diffusion-only instrument: nothing for the VAE to load up front.
+            return self.get_diffusion(profile.name)
         return self.load(profile.name)
 
     @property
@@ -115,6 +169,23 @@ class ServerState:
         if key not in self._instruments:
             self._instruments[key] = self.load(key)
         return self._instruments[key]
+
+    def get_diffusion(self, name: str) -> DiffusionState:
+        """Return an instrument's served diffusion checkpoint, loading it on first request."""
+        key = get_profile(name).name
+        if key not in self.diffusion_checkpoints:
+            raise KeyError(key)
+        if key not in self._diffusion:
+            profile = get_profile(key)
+            path = self.diffusion_checkpoints[key]
+            print(f"Loading the {profile.display_name} diffusion checkpoint {path}...")
+            model, meta = load_diffusion_from_checkpoint(path, self.device, profile)
+            self._diffusion[key] = DiffusionState(
+                profile=profile, model=model, checkpoint=path,
+                meta={k: meta.get(k) for k in ("epoch", "training")},
+                data_dir=profile.paths.data_dir,
+            )
+        return self._diffusion[key]
 
     def load(self, name: str) -> InstrumentState:
         """Load a corpus, checkpoint and slider basis for one instrument."""

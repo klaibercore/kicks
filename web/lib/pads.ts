@@ -68,5 +68,6 @@ export function padSummary(pad: Pad): string {
   const parts = Object.entries(pad.sound.sliders)
     .slice(0, 3)
     .map(([k, v]) => `${k.slice(0, 3)} ${Math.round(v * 100)}`);
+  if (pad.sound.backend === "diffusion") parts.unshift("diff");
   return parts.join(" · ");
 }

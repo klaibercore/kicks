@@ -26,6 +26,10 @@ supabase/.branches/
 
 # Website (web/ has its own .gitignore for node_modules, .next, out)
 
+# Local tool state: personal Claude permissions and the regenerable graphify graph
+.claude/settings.local.json
+/graphify-out/
+
 # OS
 .DS_Store
 Thumbs.db

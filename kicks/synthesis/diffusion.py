@@ -131,6 +131,63 @@ def sample_hits(
     return audio.squeeze(1).detach().cpu()
 
 
+#: The corpus quantiles at the two ends of a studio slider. The bank's own
+#: minimum and maximum are single outliers; the 1st and 99th percentiles are
+#: values real hits have in numbers.
+SLIDER_QUANTILES = (0.01, 0.99)
+
+
+def _bank(model) -> torch.Tensor:
+    bank = getattr(model, "label_bank", None)
+    if bank is None or bank.shape[0] == 0:
+        raise ValueError(
+            "this checkpoint has no label bank, so its sliders have no corpus range to map to",
+        )
+    return bank.to(torch.float32)
+
+
+def slider_range(model) -> tuple[np.ndarray, np.ndarray]:
+    """Descriptor values at the two slider ends, in raw profile units."""
+    bank = _bank(model)
+    low, high = SLIDER_QUANTILES
+    return (torch.quantile(bank, low, dim=0).numpy(),
+            torch.quantile(bank, high, dim=0).numpy())
+
+
+def slider_targets(model, positions) -> torch.Tensor:
+    """Slider positions in [0, 1] -> one row of descriptor targets.
+
+    Each slider walks its descriptor's training distribution by quantile: the
+    centre is the median hit, the ends the 1st and 99th percentiles, and a
+    heavy-tailed descriptor such as decay spends the slider's travel where the
+    corpus has hits instead of on its tail. Sliders are set independently, so
+    a combination can ask for something no hit in the corpus has; how close
+    the render comes is measured, not assumed.
+    """
+    bank = _bank(model)
+    positions = torch.as_tensor(positions, dtype=torch.float32).reshape(-1)
+    if positions.numel() != bank.shape[1]:
+        raise ValueError(f"expected {bank.shape[1]} slider positions, got {positions.numel()}")
+    low, high = SLIDER_QUANTILES
+    quantiles = low + (high - low) * positions.clamp(0.0, 1.0)
+    return torch.stack([torch.quantile(bank[:, i], quantiles[i]) for i in range(bank.shape[1])])
+
+
+def render_hit(
+    model, positions, *, seed: int = 0, steps: int = 50,
+    device: torch.device | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """One studio hit: a (1, samples) waveform at the training peak, and its targets.
+
+    The sampler's raw level drifts from hit to hit; the training labels were
+    measured at :data:`TARGET_PEAK`, so the hit is returned at that peak, where
+    its measured descriptors compare with the targets.
+    """
+    targets = slider_targets(model, positions)
+    wave = sample_hits(model, targets.unsqueeze(0), count=1, steps=steps, seed=seed, device=device)
+    return peak_normalize(wave), targets
+
+
 def generate_diffusion(
     count: int = 10,
     instrument: str | None = None,
@@ -204,4 +261,7 @@ def generate_diffusion(
     return paths
 
 
-__all__ = ["BANK_NEIGHBOURS", "draw_labels", "generate_diffusion", "sample_hits"]
+__all__ = [
+    "BANK_NEIGHBOURS", "SLIDER_QUANTILES", "draw_labels", "generate_diffusion",
+    "render_hit", "sample_hits", "slider_range", "slider_targets",
+]

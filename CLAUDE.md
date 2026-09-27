@@ -9,7 +9,7 @@
 - Corpus identity and licensing after the numeric rename are anchored by `data/corpus_ids.json` and the three local `data/{kicks,snares,hihats}/SOURCES.md` files. Preserve them. The Modal `kicks-corpus` volume intentionally contains WAVs only; remote verification must require exact names, sizes and SHA-256 hashes but must not require or upload `SOURCES.md`.
 - For files under `web/`, read `web/AGENTS.md` and `web/CLAUDE.md`; consult the installed Next.js docs they specify before editing application code.
 - Implemented: HF/attack loss experiments, residual/latent options, soft log-variance bound, beta schedule controls, tracking, fidelity/listening reports, control audits and promotion records.
-- Implemented and first-trained: the descriptor-conditioned waveform diffusion backend (issue #3), merged 2026-09-19, trained on hi-hat subsets of 256 and 1,000 hits on 2026-09-20 (checkpoints under `models/experiments/diffusion-hihat-*`, runs in the dashboard, numbers in `docs/waveform-diffusion.md` → *First runs*). Blind listening is prepared (`scripts/diffusion_listening.py`, report `hihat-diffusion-1000-ab`) but unjudged; nothing is served, and `kicks promote` does not know this backend. Do not describe it as a working alternative to the VAE, and do not compare the two beyond the measurements recorded. On this 8 GB Apple Silicon machine train on stratified subsets (`scripts/make_subset.py`) with `--batch-size 2 --grad-accum 4`, launched detached (`nohup … &`, verify the parent is `launchd`) so a session ending cannot kill it. Training phases wait for the user's go, each preceded by a summary of the previous phase.
+- Implemented and first-trained: the descriptor-conditioned waveform diffusion backend (issue #3), merged 2026-09-19, trained on hi-hat subsets of 256 and 1,000 hits on 2026-09-20 (checkpoints under `models/experiments/diffusion-hihat-*`, runs in the dashboard, numbers in `docs/waveform-diffusion.md` → *First runs*). Blind listening is prepared (`scripts/diffusion_listening.py`, report `hihat-diffusion-1000-ab`) but unjudged. A checkpoint can be served experimentally beside the VAE (`kicks serve --diffusion hihat=PATH`, env `KICKS_DIFFUSION`; requests select it with `backend=diffusion`, the studio shows an Engine switch); nothing is promoted, and `kicks promote` does not know this backend. Do not describe it as a working alternative to the VAE, and do not compare the two beyond the measurements recorded. On this 8 GB Apple Silicon machine train on stratified subsets (`scripts/make_subset.py`) with `--batch-size 2 --grad-accum 4`, launched detached (`nohup … &`, verify the parent is `launchd`) so a session ending cannot kill it. Training phases wait for the user's go, each preceded by a summary of the previous phase.
 - Not implemented: the proposed codec-latent sequence prior and waveform-loss training through the vocoder. Do not describe them as shipped features.
 
 ## Commands
@@ -24,6 +24,7 @@ uv run kicks dashboard                       # Loopback viewer :6060
 uv run kicks serve                           # API :8080
 uv run kicks serve --vocoder bigvgan          # Override all instrument defaults
 uv run kicks serve --griffin-lim              # No neural vocoder download; VAE still required
+uv run kicks serve -i hihat --diffusion hihat=models/experiments/modal-hihat-full-200/hihat/diffusion_best.pth   # Experimental diffusion engine beside the VAE
 uv run kicks strip -i kick --dry-run
 uv run kicks clean -i kick                    # Preview; --apply moves rejected files
 uv run kicks generate -i kick -n 20 -k 8
@@ -238,7 +239,7 @@ Paths in the table are relative to `kicks/`.
 ## API, web and hosted services
 
 - `ServerState` loads instruments lazily. Vocoders cache by `(backend, weights_dir)`; `/health` reports profile mode and a backend map unless forced. Serving instances do not hot-reload promoted checkpoints.
-- Routes: `/health`, `/instruments`, `/config`, `/generate`, `/evaluate`, `/spectrogram`, `/me`, `POST /export`. Synthesis requests select `instrument`; `/spectrogram` is pre-vocoder, `/evaluate` scores rendered/effected audio.
+- Routes: `/health`, `/instruments`, `/config`, `/generate`, `/evaluate`, `/spectrogram`, `/me`, `POST /export`. Synthesis requests select `instrument`; `/spectrogram` is pre-vocoder, `/evaluate` scores rendered/effected audio. `backend=diffusion` (with `steps` 10–200) routes `/config`, `/generate`, `/evaluate`, `/spectrogram` and `/export` to a served diffusion checkpoint: sliders map by quantile onto the checkpoint's label bank (1st–99th percentile, median at centre), renders are peak-normalised to 0.9, walked one at a time off the event loop, cached apart from effects, and dropped if the client left while queued; `/spectrogram` is then the mel of the render.
 - Sliders accept `s1..sN`, legacy `pc1..pcN`, or exposed names. With PCA, map names through `SliderBasis.names`; labels are discovered during fitting. Effects: `attack_ms`, `decay_ms`, `drive`, `filter`.
 - Shared token bucket: 10 requests/second; LRU: 100 entries, keyed by query. `web/lib/api/` sorts sound query keys for consistent caching.
 - Auth defaults off without `KICKS_SUPABASE_URL`, required with it; `KICKS_AUTH_MODE` supports required/optional/off. `/me` and `/export` require a user. Export charges one credit; `Idempotency-Key` deduplicates ledger charging.
@@ -259,3 +260,13 @@ Paths in the table are relative to `kicks/`.
 - API/auth/publication: `tests/test_api_auth.py`, `tests/test_publish.py`; full Python regression command is `uv run pytest -q`.
 - Website: from `web/`, `pnpm lint` then `pnpm build`; inspect affected views. Publishing generated analysis is a separate write step, not part of ordinary lint/build checks.
 - Report what was actually measured. Automated checks, proxy scores and listening evidence are separate claims.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

@@ -7,6 +7,11 @@ Every endpoint takes an optional ``instrument`` parameter. Sliders are addressed
 as ``s1..sN`` (position in [0, 1]) or by descriptor key (``sub=0.8``), since the
 number and meaning of the sliders follows the instrument.
 
+The synthesis endpoints also take ``backend``: ``vae`` (the default) or
+``diffusion`` for an instrument the server was started with a waveform
+diffusion checkpoint for. Diffusion renders take ``steps`` (sampler steps,
+10-200, default 50) and run off the event loop, one at a time.
+
 Accounts and credits are optional (see :mod:`kicks.api.auth`). When enabled,
 previews stay free for signed-in users and ``POST /export`` spends one credit
 per rendered file — the same audio, but licensed and recorded against the
@@ -28,25 +33,33 @@ import torch
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from ..analysis.basis import slider_positions_to_axis_values
 from ..analysis.descriptors import compute_descriptors
 from ..analysis.evaluation import analyze_hit, score_sample
 from ..audio import effects
-from ..audio.constants import SAMPLE_RATE
+from ..audio.constants import N_FRAMES, SAMPLE_RATE
 from ..audio.mel import spectrogram as waveform_spectrogram
+from ..data.waveforms import label_waveform, peak_normalize
 from ..instruments import available, get_profile, normalize
 from ..synthesis.controlled import control_latent, render_controls
+from ..synthesis.diffusion import render_hit, slider_range
 from ..synthesis.identity import IdentityBasis
 from .auth import Auth, InsufficientCredits, User
 from .middleware import LRUCache, RateLimiter
-from .state import InstrumentState, ServerState
+from .state import DiffusionState, InstrumentState, ServerState
 
 state = ServerState()
 auth = Auth()
 rate_limiter = RateLimiter(rate=10.0)
 audio_cache = LRUCache(max_size=100)
 render_cache: LRUCache[tuple[torch.Tensor, torch.Tensor]] = LRUCache(max_size=32)
+
+BACKENDS = ("vae", "diffusion")
+DIFFUSION_STEPS = (10, 200)
+DEFAULT_DIFFUSION_STEPS = 50
+EFFECTS = ("attack_ms", "decay_ms", "drive", "filter")
 
 
 @asynccontextmanager
@@ -97,6 +110,39 @@ def _resolve(request: Request) -> InstrumentState:
         ) from exc
 
 
+def _backend(request: Request) -> str:
+    backend = request.query_params.get("backend", "vae")
+    if backend not in BACKENDS:
+        raise HTTPException(status_code=422, detail=f"backend must be one of {', '.join(BACKENDS)}")
+    return backend
+
+
+def _resolve_diffusion(request: Request) -> DiffusionState:
+    """The diffusion checkpoint served for the instrument named in the query string."""
+    name = request.query_params.get("instrument") or state.default_instrument
+    if normalize(name) not in available():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown instrument {name!r}. Available: {', '.join(available())}",
+        )
+    try:
+        return state.get_diffusion(name)
+    except KeyError:
+        raise HTTPException(
+            status_code=503,
+            detail=f"No diffusion checkpoint is served for {name!r}. "
+                   f"Start the API with `kicks serve --diffusion {normalize(name)}=PATH`.",
+        ) from None
+
+
+def _steps(request: Request) -> int:
+    raw = request.query_params.get("steps", str(DEFAULT_DIFFUSION_STEPS))
+    low, high = DIFFUSION_STEPS
+    if not re.fullmatch(r"[0-9]{1,3}", raw) or not low <= int(raw) <= high:
+        raise HTTPException(status_code=422, detail=f"steps must be an integer in [{low}, {high}]")
+    return int(raw)
+
+
 def _float_param(request: Request, key: str) -> float | None:
     raw = request.query_params.get(key)
     if raw is None:
@@ -124,17 +170,19 @@ def _texture_seed(request: Request) -> int:
     return int(raw)
 
 
-def _slider_positions(request: Request, inst: InstrumentState) -> list[float]:
+def _slider_positions(request: Request, inst: InstrumentState | DiffusionState) -> list[float]:
     """Read slider positions in [0, 1], defaulting to centre.
 
     Three spellings per slider, checked in order: positional ``s1..sN``, the
     legacy ``pc1..pcN``, and the slider's own label (``click``, ``sizzle``).
-    The label is taken from the *fitted* basis rather than the profile's
-    descriptor order — under the PCA basis, slider 1 is whichever descriptor
-    PC1 turned out to correlate with, which is not knowable in advance.
+    For the VAE the label is taken from the *fitted* basis rather than the
+    profile's descriptor order — under the PCA basis, slider 1 is whichever
+    descriptor PC1 turned out to correlate with, which is not knowable in
+    advance. Diffusion sliders are the checkpoint's descriptors, in order.
     """
+    names = inst.names if isinstance(inst, DiffusionState) else inst.basis.names
     positions = []
-    for i, label in enumerate(inst.basis.names):
+    for i, label in enumerate(names):
         raw = None
         for name in (f"s{i + 1}", f"pc{i + 1}", slider_key(label)):
             if name in request.query_params:
@@ -162,17 +210,26 @@ def _synthesize(request: Request, inst: InstrumentState) -> tuple[torch.Tensor, 
     """
     positions = _slider_positions(request, inst)
     seed = _texture_seed(request)
-    attack_ms = _float_param(request, "attack_ms")
-    decay_ms = _float_param(request, "decay_ms")
-    drive = _float_param(request, "drive")
-    cutoff = _float_param(request, "filter")
+    shaping = _shaping(request)
     vocoder = state.vocoder_for(inst.profile)
-    key = repr((id(inst.model), id(inst.basis), id(vocoder), positions, seed, attack_ms, decay_ms, drive, cutoff))
+    key = repr((id(inst.model), id(inst.basis), id(vocoder), positions, seed, shaping))
     cached = render_cache.get(key)
     if cached is not None:
         return cached
     spec, waveform = render_controls(inst.model, inst.basis, inst.profile, inst.response,
                                      vocoder, state.device, positions, seed=seed)
+    result = spec.cpu(), _apply_shaping(waveform, shaping)
+    render_cache.put(key, result)
+    return result
+
+
+def _shaping(request: Request) -> tuple[float | None, ...]:
+    return tuple(_float_param(request, key) for key in EFFECTS)
+
+
+def _apply_shaping(waveform: torch.Tensor, shaping: tuple[float | None, ...]) -> torch.Tensor:
+    """Apply the user's effects to a (1, T) waveform."""
+    attack_ms, decay_ms, drive, cutoff = shaping
     wf = waveform.squeeze(0)
     if attack_ms is not None or decay_ms is not None:
         wf = effects.apply_envelope(wf, attack_ms, decay_ms)
@@ -180,9 +237,47 @@ def _synthesize(request: Request, inst: InstrumentState) -> tuple[torch.Tensor, 
         wf = effects.apply_drive(wf, drive)
     if cutoff is not None:
         wf = effects.apply_lowpass(wf, cutoff)
-    result = spec.cpu(), wf.unsqueeze(0)
-    render_cache.put(key, result)
-    return result
+    return wf.unsqueeze(0)
+
+
+async def _synthesize_diffusion(
+    request: Request, diff: DiffusionState,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Slider settings -> (shaped waveform, descriptor targets) from the denoiser.
+
+    The unshaped render is cached apart from the effects, so moving an effect
+    reshapes the last hit instead of walking the sampler again. Walks queue one
+    at a time; a request whose client left while it waited (the studio aborts a
+    superseded preview) is dropped instead of rendered for nobody.
+    """
+    positions = _slider_positions(request, diff)
+    seed = _texture_seed(request)
+    steps = _steps(request)
+    shaping = _shaping(request)
+    key = repr(("diffusion", id(diff.model), positions, seed, steps))
+    rendered = render_cache.get(key)
+    if rendered is None:
+        async with diff.lock:
+            rendered = render_cache.get(key)  # rendered while this request waited
+            if rendered is None:
+                if await request.is_disconnected():
+                    raise HTTPException(status_code=499, detail="client closed the request")
+                rendered = await run_in_threadpool(
+                    render_hit, diff.model, positions, seed=seed, steps=steps, device=state.device,
+                )
+                render_cache.put(key, rendered)
+    waveform, targets = rendered
+    return _apply_shaping(waveform, shaping), targets
+
+
+async def _render(request: Request) -> tuple[InstrumentState | DiffusionState, torch.Tensor]:
+    """The instrument state and shaped waveform for either backend."""
+    if _backend(request) == "diffusion":
+        diff = _resolve_diffusion(request)
+        waveform, _ = await _synthesize_diffusion(request, diff)
+        return diff, waveform
+    inst = _resolve(request)
+    return inst, _synthesize(request, inst)[1]
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +298,7 @@ async def health() -> dict:
         "vocoders": state.vocoders,
         "control": state.control_basis,
         "loaded": state.loaded,
+        "diffusion": sorted(state.diffusion_checkpoints),
         "cached_responses": len(audio_cache),
         "auth": auth.describe(),
     }
@@ -228,13 +324,21 @@ async def instruments() -> dict:
             "descriptors": profile.descriptor_keys,
             "trained": os.path.exists(profile.paths.checkpoint),
             "loaded": name in state.loaded,
+            "backends": [
+                backend for backend, served in (
+                    ("vae", os.path.exists(profile.paths.checkpoint)),
+                    ("diffusion", profile.name in state.diffusion_checkpoints),
+                ) if served
+            ],
         })
     return {"instruments": rows, "default": state.default_instrument}
 
 
 @app.get("/config")
 async def config(request: Request) -> dict:
-    """Slider definitions for one instrument."""
+    """Slider definitions for one instrument and backend."""
+    if _backend(request) == "diffusion":
+        return _diffusion_config(_resolve_diffusion(request))
     inst = _resolve(request)
     profile = inst.profile
     sliders = [
@@ -257,10 +361,49 @@ async def config(request: Request) -> dict:
         "display_name": profile.display_name,
         "description": profile.description,
         "sliders": sliders,
+        "backend": "vae",
         "vocoder": state.vocoder_type_for(profile),
         "control": state.control_basis,
         "calibration": inst.basis.calibration,
         "variation": isinstance(inst.basis.basis, IdentityBasis),
+    }
+
+
+def _diffusion_config(diff: DiffusionState) -> dict:
+    profile = diff.profile
+    low, high = slider_range(diff.model)
+    training = diff.meta.get("training") or {}
+    return {
+        "instrument": profile.name,
+        "display_name": profile.display_name,
+        "description": profile.description,
+        "sliders": [
+            {
+                "id": i + 1,
+                "key": slider_key(d.label),
+                "name": d.label,
+                "min": 0,
+                "max": 1,
+                "default": 0.5,
+                "step": 0.01,
+                "description": d.doc or d.label,
+                # The corpus's 1st and 99th percentiles; the centre is its median.
+                "target_min": float(low[i]),
+                "target_max": float(high[i]),
+            }
+            for i, d in enumerate(profile.descriptors)
+        ],
+        "backend": "diffusion",
+        "vocoder": "none",
+        "control": "descriptor",
+        "calibration": None,
+        "variation": True,
+        "steps": {"default": DEFAULT_DIFFUSION_STEPS, "min": DIFFUSION_STEPS[0], "max": DIFFUSION_STEPS[1]},
+        "checkpoint": {
+            "name": os.path.basename(diff.checkpoint),
+            "epoch": diff.meta.get("epoch"),
+            "run_id": training.get("run_id"),
+        },
     }
 
 
@@ -277,8 +420,7 @@ async def generate(
         if cached is not None:
             return StreamingResponse(io.BytesIO(cached), media_type="audio/wav")
 
-    inst = _resolve(request)
-    _, waveform = _synthesize(request, inst)
+    _, waveform = await _render(request)
 
     buf = io.BytesIO()
     sf.write(buf, waveform.squeeze(0).numpy(), SAMPLE_RATE, format="WAV", subtype="PCM_24")
@@ -299,6 +441,8 @@ async def evaluate(
     Same query parameters as /generate. Returns the corpus-referenced perceptual
     verdicts plus the spectrogram descriptors.
     """
+    if _backend(request) == "diffusion":
+        return await _evaluate_diffusion(request)
     inst = _resolve(request)
     spec, waveform = _synthesize(request, inst)
     descriptors = compute_descriptors(
@@ -309,7 +453,7 @@ async def evaluate(
 
     metrics = analyze_hit(waveform.squeeze(0).numpy().astype(np.float32), inst.profile)
     if metrics is None:
-        return {"instrument": inst.profile.name,
+        return {"instrument": inst.profile.name, "backend": "vae",
                 "error": "generated audio is silent or unusable",
                 "descriptors": descriptors}
 
@@ -326,6 +470,7 @@ async def evaluate(
                        "includes_effects": any(k in request.query_params for k in ("attack_ms", "decay_ms", "drive", "filter"))}
     return {
         "instrument": inst.profile.name,
+        "backend": "vae",
         "score": report.score,
         "grade": report.grade,
         "likeness_pct": report.likeness_pct,
@@ -340,18 +485,80 @@ async def evaluate(
     }
 
 
+async def _evaluate_diffusion(request: Request) -> dict:
+    """/evaluate for a diffusion render: verdicts, and how close it came to its sliders.
+
+    Descriptors are measured at the training labels' peak, the level the
+    targets were learned at, on the audio the client receives (effects included).
+    """
+    diff = _resolve_diffusion(request)
+    profile = diff.profile
+    waveform, targets = await _synthesize_diffusion(request, diff)
+    measured = label_waveform(peak_normalize(waveform), profile)
+    descriptors = dict(zip(profile.descriptor_keys, (float(v) for v in measured)))
+
+    metrics = analyze_hit(waveform.squeeze(0).numpy().astype(np.float32), profile)
+    if metrics is None:
+        return {"instrument": profile.name, "backend": "diffusion",
+                "error": "generated audio is silent or unusable",
+                "descriptors": descriptors}
+
+    report = score_sample("api", metrics, diff.reference(), profile)
+    low, high = slider_range(diff.model)
+    target_values = targets.numpy()
+    error = float(np.max(np.abs(measured - target_values) / np.maximum(high - low, 1e-6)))
+    return {
+        "instrument": profile.name,
+        "backend": "diffusion",
+        "score": report.score,
+        "grade": report.grade,
+        "likeness_pct": report.likeness_pct,
+        "verdicts": [
+            {"metric": v.key, "symbol": v.symbol, "text": v.text,
+             "percentile": v.percentile, "z": v.z}
+            for v in report.verdicts
+        ],
+        "metrics": metrics,
+        "descriptors": descriptors,
+        "control_fit": {
+            "max_normalized_error": error,
+            "limited": error > .05,
+            "targets": dict(zip(profile.descriptor_keys, target_values.tolist())),
+            "seed": _texture_seed(request),
+            "includes_effects": any(k in request.query_params for k in EFFECTS),
+        },
+    }
+
+
 @app.get("/spectrogram")
 async def spectrogram(
     request: Request,
     _rl: None = Depends(rate_limiter),
     _user: User | None = Depends(auth.current_user),
 ) -> dict:
-    """Raw decoded spectrogram — the model's output before the vocoder."""
+    """Raw decoded spectrogram — the model's output before the vocoder.
+
+    A diffusion render has no spectrogram of its own; for it this is the
+    normalised mel spectrogram of the rendered waveform, effects included.
+    """
+    if _backend(request) == "diffusion":
+        diff = _resolve_diffusion(request)
+        waveform, _ = await _synthesize_diffusion(request, diff)
+        spec = waveform_spectrogram(waveform, n_frames=N_FRAMES).squeeze(0)
+        return {
+            "instrument": diff.profile.name,
+            "backend": "diffusion",
+            "source": "render",
+            "shape": list(spec.shape),
+            "data": spec.cpu().numpy().tolist(),
+        }
     inst = _resolve(request)
     with torch.no_grad():
         spec = inst.model.decode(_latent_for(request, inst))
     return {
         "instrument": inst.profile.name,
+        "backend": "vae",
+        "source": "decoder",
         "shape": [inst.model.n_mels, inst.model.n_frames],
         "data": spec.squeeze().cpu().numpy().tolist(),
     }
@@ -364,14 +571,22 @@ async def spectrogram(
 _SAFE_NAME = re.compile(r"[^a-z0-9]+")
 
 
-def _export_filename(inst: InstrumentState, positions: list[float], seed: int = 0) -> str:
-    """``kick_sub80_punch50_....wav`` — the settings, readable in a file browser."""
+def _export_filename(
+    inst: InstrumentState | DiffusionState, positions: list[float], seed: int = 0,
+) -> str:
+    """``kick_sub80_punch50_....wav`` — the settings, readable in a file browser.
+
+    Diffusion renders are tagged ``_diffusion`` after the instrument name.
+    """
+    diffusion = isinstance(inst, DiffusionState)
+    names = inst.names if diffusion else inst.basis.names
     parts = [
         f"{_SAFE_NAME.sub('', name.lower())}{round(p * 100):02d}"
-        for name, p in zip(inst.basis.names, positions)
+        for name, p in zip(names, positions)
     ]
+    tag = "_diffusion" if diffusion else ""
     suffix = f"_v{seed}" if seed else ""
-    return f"{inst.profile.name}_{'_'.join(parts)}{suffix}.wav"
+    return f"{inst.profile.name}{tag}_{'_'.join(parts)}{suffix}.wav"
 
 
 @app.post("/export")
@@ -389,7 +604,8 @@ async def export(
     if auth.credits is None:
         raise HTTPException(status_code=503, detail="Exports are not enabled on this server")
 
-    inst = _resolve(request)
+    diffusion = _backend(request) == "diffusion"
+    inst = _resolve_diffusion(request) if diffusion else _resolve(request)
     positions = _slider_positions(request, inst)
     seed = _texture_seed(request)
     export_id = request.headers.get("idempotency-key") or str(uuid.uuid4())
@@ -398,15 +614,27 @@ async def export(
     except ValueError:
         raise HTTPException(status_code=422, detail="Idempotency-Key must be a UUID") from None
 
-    params = {
-        "instrument": inst.profile.name,
-        "sliders": dict(zip(inst.basis.names, positions)),
-        "seed": seed,
-        "control": state.control_basis,
-        "vocoder": state.vocoder_type_for(inst.profile),
-        **{k: v for k, v in request.query_params.items()
-           if k in ("attack_ms", "decay_ms", "drive", "filter")},
-    }
+    if diffusion:
+        training = inst.meta.get("training") or {}
+        params = {
+            "instrument": inst.profile.name,
+            "backend": "diffusion",
+            "sliders": dict(zip(inst.names, positions)),
+            "seed": seed,
+            "steps": _steps(request),
+            "checkpoint": os.path.basename(inst.checkpoint),
+            "run_id": training.get("run_id"),
+        }
+    else:
+        params = {
+            "instrument": inst.profile.name,
+            "backend": "vae",
+            "sliders": dict(zip(inst.basis.names, positions)),
+            "seed": seed,
+            "control": state.control_basis,
+            "vocoder": state.vocoder_type_for(inst.profile),
+        }
+    params.update({k: v for k, v in request.query_params.items() if k in EFFECTS})
     try:
         remaining, generation_id = await auth.credits.charge_export(
             user.id, export_id, inst.profile.name, params,
@@ -417,7 +645,7 @@ async def export(
         ) from None
 
     try:
-        _, waveform = _synthesize(request, inst)
+        _, waveform = await _render(request)
         buf = io.BytesIO()
         sf.write(buf, waveform.squeeze(0).numpy(), SAMPLE_RATE, format="WAV", subtype="PCM_24")
     except Exception:

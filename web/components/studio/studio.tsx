@@ -4,6 +4,7 @@ import { AlertCircleIcon } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useState } from "react";
 import { EffectsRack } from "@/components/studio/effects-rack";
+import { EnginePicker } from "@/components/studio/engine-picker";
 import { EvalPanel } from "@/components/studio/eval-panel";
 import { KitManager } from "@/components/studio/kit-manager";
 import { MidiPanel } from "@/components/studio/midi-panel";
@@ -20,7 +21,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/hooks/use-auth";
 import { useKit } from "@/hooks/use-kit";
-import { StudioProvider, useStudio } from "@/hooks/use-studio";
+import { backendsOf, StudioProvider, useStudio } from "@/hooks/use-studio";
 import { config } from "@/lib/config";
 import { useMidi, type NoteEvent } from "@/lib/midi";
 
@@ -71,6 +72,7 @@ function StudioBody() {
   }
 
   const needsSignIn = authEnabled && ready && !user && studio.health?.auth.mode === "required";
+  const diffusion = studio.backend === "diffusion";
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6">
@@ -83,8 +85,17 @@ function StudioBody() {
         </div>
         {studio.health ? (
           <div className="flex flex-wrap gap-1.5 font-mono text-[11px]">
-            <Badge variant="outline">{studio.config?.vocoder ?? studio.health.vocoder}</Badge>
-            <Badge variant="outline">{studio.config?.variation ? "Corpus texture" : `${studio.health.control} basis`}</Badge>
+            {diffusion ? (
+              <>
+                <Badge variant="outline">diffusion</Badge>
+                <Badge variant="outline">{studio.sound?.steps ?? studio.config?.steps?.default ?? "—"} steps</Badge>
+              </>
+            ) : (
+              <>
+                <Badge variant="outline">{studio.config?.vocoder ?? studio.health.vocoder}</Badge>
+                <Badge variant="outline">{studio.config?.variation ? "Corpus texture" : `${studio.health.control} basis`}</Badge>
+              </>
+            )}
             <Badge variant="outline">{studio.health.device}</Badge>
           </div>
         ) : null}
@@ -108,9 +119,11 @@ function StudioBody() {
           {studio.instruments.length === 0
             ? [0, 1, 2].map((i) => <Skeleton key={i} className="h-7 w-20" />)
             : studio.instruments.map((inst) => (
-                <TabsTrigger key={inst.name} value={inst.name} disabled={!inst.trained} className="px-3">
+                <TabsTrigger key={inst.name} value={inst.name} disabled={backendsOf(inst).length === 0} className="px-3">
                   {inst.display_name}
-                  {!inst.trained ? <span className="ml-1 text-[10px] text-muted-foreground">untrained</span> : null}
+                  {backendsOf(inst).length === 0 ? (
+                    <span className="ml-1 text-[10px] text-muted-foreground">untrained</span>
+                  ) : null}
                 </TabsTrigger>
               ))}
         </TabsList>
@@ -123,10 +136,13 @@ function StudioBody() {
             <CardDescription>{studio.config?.description ?? "Loading the slider basis…"}</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-6">
+            <EnginePicker />
             {studio.config ? <SliderRack /> : <SliderSkeleton />}
             {studio.config?.variation ? (
               <p className="text-xs leading-relaxed text-muted-foreground">
-                Explore textures with New variation, then shape the tone and decay. Each variation is saved with your pads.
+                {diffusion
+                  ? "New variation starts the sampler from different noise: another hit aiming at the same slider targets. Each variation is saved with your pads."
+                  : "Explore textures with New variation, then shape the tone and decay. Each variation is saved with your pads."}
               </p>
             ) : null}
             <div>
@@ -141,12 +157,18 @@ function StudioBody() {
           <Card>
             <CardHeader>
               <CardTitle>Render</CardTitle>
-              <CardDescription>What the vocoder produced for the current settings.</CardDescription>
+              <CardDescription>
+                {diffusion
+                  ? "What the diffusion model produced for the current settings. No vocoder is involved."
+                  : "What the vocoder produced for the current settings."}
+              </CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-4">
               <WaveformView buffer={studio.buffer} className="h-28 w-full" />
               <div className="flex items-center justify-between">
-                <h3 className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Decoded spectrogram</h3>
+                <h3 className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                  {diffusion ? "Spectrogram of the render" : "Decoded spectrogram"}
+                </h3>
                 <Button size="xs" variant="ghost" onClick={() => void studio.loadSpectrogram()} disabled={!studio.sound}>
                   {studio.spectrogram ? "Refresh" : "Show"}
                 </Button>

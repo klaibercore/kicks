@@ -407,11 +407,43 @@ Of what the issue asks for after implementation:
   the fingerprint covers paths, sizes and mtimes, not content, so it does not
   detect near-duplicates or pack leakage. The issue asks for splits by
   pack/family and near-duplicate checks; neither is implemented.
-- Nothing is wired into the API or the studio. `kicks serve` is unchanged.
+- The studio integration (below) has no latency benchmark beyond the one
+  measurement recorded there, and its slider mapping has had no control audit.
 
 A promotion path does not exist for this backend, and `kicks promote` still
 means the VAE checkpoint. Deciding whether the backend is worth keeping needs
 the evidence above, not the code alone.
+
+## Serving in the studio
+
+Added 2026-09-27. A checkpoint is served beside the VAE, never instead of it,
+and only when named:
+
+```bash
+uv run kicks serve -i hihat --diffusion hihat=models/experiments/modal-hihat-full-200/hihat/diffusion_best.pth
+```
+
+- **Selection.** Requests carry `backend=diffusion`; `/instruments` lists each
+  instrument's `backends`, and the studio shows an Engine switch (VAE /
+  Diffusion) plus sampler-step presets (25/50/100/200; the API takes 10–200)
+  on instruments that have one. Pads remember the backend and steps.
+- **Sliders.** Each slider walks its descriptor's training distribution by
+  quantile, from the label bank's 1st to its 99th percentile, with the median
+  at the centre (`slider_targets()` in `kicks/synthesis/diffusion.py`). The
+  five sliders are set independently, so a combination can ask for something no
+  corpus hit has. `/evaluate` reports measured against target per descriptor.
+  This mapping has had no axis/corner/random audit.
+- **Texture.** `seed` fixes the starting noise; New variation draws another.
+- **Level.** Renders are peak-normalised to 0.9, the level the labels were
+  measured at, so the render's own level drift is not visible in the studio.
+- **Cost.** Walks run off the event loop, one at a time; a queued request whose
+  client left (the studio aborts superseded previews) is dropped. The unshaped
+  render is cached, so effects reshape it without resampling. Audition on
+  release defaults to off for this engine. One measurement on the M1 (MPS),
+  full-200 checkpoint: 8.3 s for a 50-step render.
+- **Evaluation wording.** The verdict "audible noise floor in the tail —
+  vocoder hiss" is the corpus metric's fixed text; for a diffusion render no
+  vocoder is involved, and the floor is the model's own.
 
 ## Known issues
 

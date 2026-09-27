@@ -14,6 +14,7 @@ const symbolTone: Record<string, string> = {
 /** Corpus-referenced verdicts: is this hit inside the distribution of real ones? */
 export function EvalPanel() {
   const { evaluation, evaluating, evaluate, sound } = useStudio();
+  const targets = evaluation?.backend === "diffusion" ? evaluation.control_fit?.targets : undefined;
 
   return (
     <div className="flex flex-col gap-3">
@@ -55,17 +56,40 @@ export function EvalPanel() {
             <p className="text-xs leading-relaxed text-muted-foreground">
               {evaluation.control_fit.includes_effects
                 ? "Shaping effects are included in these measurements and can move the sound beyond its slider targets."
-                : "Some controls have reached this texture’s range. Try another variation for a different response."}
+                : targets
+                  ? "The render misses at least one slider target by more than 5% of that slider’s range. The diffusion model follows its sliders approximately; another variation may land closer."
+                  : "Some controls have reached this texture’s range. Try another variation for a different response."}
             </p>
           ) : null}
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-1 border-t border-border pt-3 font-mono text-xs sm:grid-cols-3">
-            {Object.entries(evaluation.descriptors).map(([k, v]) => (
-              <div key={k} className="flex justify-between">
-                <dt className="text-muted-foreground">{k}</dt>
-                <dd className="tabular">{v.toFixed(3)}</dd>
-              </div>
-            ))}
-          </dl>
+          {targets ? (
+            <table className="border-t border-border pt-3 font-mono text-xs">
+              <thead>
+                <tr className="text-muted-foreground">
+                  <th className="pt-3 pb-1 text-left font-normal">Descriptor</th>
+                  <th className="pt-3 pb-1 text-right font-normal">Measured</th>
+                  <th className="pt-3 pb-1 text-right font-normal">Target</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(evaluation.descriptors).map(([k, v]) => (
+                  <tr key={k}>
+                    <td className="text-muted-foreground">{k}</td>
+                    <td className="tabular text-right">{v.toFixed(3)}</td>
+                    <td className="tabular text-right text-muted-foreground">{targets[k]?.toFixed(3) ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-1 border-t border-border pt-3 font-mono text-xs sm:grid-cols-3">
+              {Object.entries(evaluation.descriptors).map(([k, v]) => (
+                <div key={k} className="flex justify-between">
+                  <dt className="text-muted-foreground">{k}</dt>
+                  <dd className="tabular">{v.toFixed(3)}</dd>
+                </div>
+              ))}
+            </dl>
+          )}
         </div>
       ) : null}
     </div>

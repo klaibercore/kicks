@@ -79,7 +79,13 @@ downloads about **1.72 GB** of weights; later loads reuse the local copy.
 uv run kicks serve --vocoder bigvgan   # Force BigVGAN for all instruments
 uv run kicks serve --griffin-lim       # Classical reconstruction; no vocoder weights
 uv run kicks serve --control pca       # Explore principal-component controls
+uv run kicks serve -i hihat --diffusion hihat=models/experiments/modal-hihat-full-200/hihat/diffusion_best.pth
+                                       # Also serve an experimental diffusion checkpoint
 ```
+
+`--diffusion INSTRUMENT=PATH` (repeatable) serves a waveform diffusion
+checkpoint beside the VAE. The studio then shows an Engine switch on that
+instrument; see [`docs/waveform-diffusion.md`](docs/waveform-diffusion.md#serving-in-the-studio).
 
 Griffin-Lim still needs a trained VAE. It is useful for checking the pipeline;
 the neural vocoders are the fidelity path.
@@ -508,7 +514,9 @@ targets are resampled from the checkpoint's own training rows, so a default
 `scripts/diffusion_listening.py` turns a checkpoint into blind A/B pairs
 against the matching corpus hits for the dashboard's Listening lab. The first
 hi-hat runs (September 2026) produce recognisable transients and sizzle over a
-residual noise floor; they are documented, unlistened blind, and not served.
+residual noise floor; they are documented and unlistened blind. A checkpoint can
+be served experimentally beside the VAE with `kicks serve --diffusion`; none is
+promoted.
 [`docs/waveform-diffusion.md`](docs/waveform-diffusion.md) has the design, the
 measurements, the budget table, the run results and the list of what has not
 been measured. [`docs/modal-training.md`](docs/modal-training.md) documents the
@@ -549,7 +557,7 @@ Base URL: `http://localhost:8080`. Synthesis requests accept `instrument`.
 | `GET /config` | Slider configuration for an instrument |
 | `GET /generate` | Cached preview WAV |
 | `GET /evaluate` | Waveform verdicts and descriptors for the same settings |
-| `GET /spectrogram` | Decoded mel before vocoding |
+| `GET /spectrogram` | Decoded mel before vocoding; for `backend=diffusion`, the mel of the render |
 | `GET /me` | Signed-in user and credit balance |
 | `POST /export` | 24-bit WAV; one credit, with an `Idempotency-Key` header for retries |
 
@@ -562,7 +570,9 @@ Slider parameters accept `s1..sN`, legacy `pc1..pcN` or the exposed slider label
 omitted values default to the center. Effects use `attack_ms`, `decay_ms`,
 `drive` and `filter`. Snare/hi-hat requests also accept an integer `seed` in
 `[0, 4294967295]` (default `0`) for reproducible texture selection; `/config`
-advertises support with `variation: true`. Preview, evaluation, spectrogram and
+advertises support with `variation: true`. `backend=diffusion` selects a served
+diffusion checkpoint (`/instruments` lists each instrument's `backends`) and
+accepts `steps` in `[10, 200]` (default `50`). Preview, evaluation, spectrogram and
 export share that seed. Synthesis is limited by a shared 10 requests/second token
 bucket and uses a 100-entry LRU cache.
 

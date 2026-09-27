@@ -416,6 +416,11 @@ def serve(
     griffin_lim: bool = typer.Option(False, "--griffin-lim", help="Use classical reconstruction (lower quality, no model download)"),
     vocoder: str = typer.Option(None, "--vocoder", help="Force one backend for every instrument: discoder, bigvgan or griffinlim (default: each profile's own)"),
     control: str = typer.Option(None, "--control", help="Slider basis: 'descriptor' (default) or 'pca'"),
+    diffusion: list[str] = typer.Option(
+        None, "--diffusion",
+        help="Also serve a waveform diffusion checkpoint, as INSTRUMENT=PATH (repeatable); "
+             "requests select it with backend=diffusion",
+    ),
     reload: bool = typer.Option(False, "--reload", help="Auto-reload on code changes (development)"),
 ) -> None:
     """Start the REST API (the website in web/ is its client)."""
@@ -438,6 +443,21 @@ def serve(
         if backend not in ("discoder", "bigvgan", "griffinlim"):
             raise typer.BadParameter("vocoder must be 'discoder', 'bigvgan', or 'griffinlim'")
         os.environ["KICKS_VOCODER"] = backend
+
+    if diffusion:
+        from kicks.api.state import parse_diffusion_checkpoints
+
+        spec = ",".join(diffusion)
+        try:
+            served = parse_diffusion_checkpoints(spec)
+        except (ValueError, KeyError) as exc:
+            raise typer.BadParameter(str(exc), param_hint="--diffusion") from exc
+        missing = [path for path in served.values() if not os.path.exists(path)]
+        if missing:
+            raise typer.BadParameter(f"not found: {', '.join(missing)}", param_hint="--diffusion")
+        os.environ["KICKS_DIFFUSION"] = spec
+        for name, path in served.items():
+            print(f"Diffusion backend for {name}: {path} (experimental; not a promoted model)")
 
     print(f"Serving {profile.display_name} on http://{host}:{port}")
     uvicorn.run("kicks.api:app", host=host, port=port, reload=reload)
