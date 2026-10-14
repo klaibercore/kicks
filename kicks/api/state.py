@@ -78,6 +78,21 @@ class DiffusionState:
         return [d.label for d in self.profile.descriptors]
 
 
+@dataclass
+class ProceduralState:
+    """A physical voice, available without a corpus or checkpoint."""
+    profile: InstrumentProfile
+
+    @property
+    def names(self) -> list[str]:
+        return [p.label for p in self.profile.procedural.parameters]
+
+    @property
+    def keys(self) -> list[str]:
+        # Namespaced: decay_ms and drive are also post-processing effects.
+        return [f"voice_{p.key}" for p in self.profile.procedural.parameters]
+
+
 def parse_diffusion_checkpoints(spec: str | None) -> dict[str, str]:
     """``"hihat=a.pth,snare=b.pth"`` -> ``{"hihat": "a.pth", "snare": "b.pth"}``."""
     served: dict[str, str] = {}
@@ -105,6 +120,7 @@ class ServerState:
         #: Instrument -> diffusion checkpoint served beside its VAE.
         self.diffusion_checkpoints: dict[str, str] = {}
         self._diffusion: dict[str, DiffusionState] = {}
+        self.default_backend = "vae"
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -113,7 +129,8 @@ class ServerState:
         instrument: str | None = None,
         vocoder_type: str | None = None,
         control_basis: str | None = None,
-    ) -> InstrumentState:
+        backend: str | None = None,
+    ) -> InstrumentState | DiffusionState | ProceduralState:
         self.device = get_device()
         self.vocoder_override = vocoder_type or os.environ.get("KICKS_VOCODER") or None
         if self.vocoder_override:
@@ -127,10 +144,24 @@ class ServerState:
                 raise FileNotFoundError(f"diffusion checkpoint for {name} not found: {path}")
         profile = get_profile(instrument)
         self.default_instrument = profile.name
-        if not os.path.exists(profile.paths.checkpoint) and profile.name in self.diffusion_checkpoints:
-            # A diffusion-only instrument: nothing for the VAE to load up front.
+        backend = backend or os.environ.get("KICKS_BACKEND", "auto")
+        if backend not in ("auto", "vae", "diffusion", "dsp"):
+            raise ValueError("KICKS_BACKEND must be auto, vae, diffusion or dsp")
+        if backend == "auto":
+            backend = "vae" if os.path.exists(profile.paths.checkpoint) else (
+                "diffusion" if profile.name in self.diffusion_checkpoints else "dsp")
+        self.default_backend = backend
+        if backend == "dsp":
+            return self.get_dsp(profile.name)
+        if backend == "diffusion":
             return self.get_diffusion(profile.name)
         return self.load(profile.name)
+
+    def get_dsp(self, name: str | None = None) -> ProceduralState:
+        profile = get_profile(name or self.default_instrument)
+        if profile.procedural is None:
+            raise KeyError(profile.name)
+        return ProceduralState(profile)
 
     @property
     def loaded(self) -> list[str]:

@@ -3,7 +3,6 @@
 import { MenuIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { UserMenu } from "@/components/auth/user-menu";
 import { Logo } from "@/components/site/logo";
 import { ThemeToggle } from "@/components/site/theme-toggle";
 import { Button } from "@/components/ui/button";
@@ -12,13 +11,12 @@ import { cn } from "@/lib/utils";
 
 const nav = [
   { href: "/studio/", label: "Studio" },
-  { href: "/analysis/", label: "Corpus" },
-  { href: "/pricing/", label: "Pricing" },
+  { href: "/analysis/", label: "Analysis" },
 ];
 
 export function SiteHeader() {
   const pathname = usePathname();
-  const isActive = (href: string) => pathname === href || pathname === href.replace(/\/$/, "");
+  const isActive = (href: string) => (href === "/studio/" && pathname === "/") || pathname === href || pathname === href.replace(/\/$/, "");
 
   return (
     <header
@@ -43,7 +41,6 @@ export function SiteHeader() {
         </nav>
         <div className="ml-auto flex items-center gap-2">
           <ThemeToggle />
-          <UserMenu />
           <Sheet>
             <SheetTrigger
               render={<Button variant="ghost" size="icon-sm" className="md:hidden" aria-label="Open menu" />}

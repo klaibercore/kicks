@@ -21,8 +21,6 @@ build/
 # Environment
 .env*
 !.env.example
-supabase/.temp/
-supabase/.branches/
 
 # Website (web/ has its own .gitignore for node_modules, .next, out)
 

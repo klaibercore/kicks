@@ -5,7 +5,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useStudio } from "@/hooks/use-studio";
 
 /**
- * One slider per perceptual axis. The layout comes from the API — under the
+ * One slider per configured physical parameter or perceptual axis. The layout comes from the API — under the
  * PCA basis the axis names are discovered at fit time, so nothing here knows
  * what a "kick" is.
  */
@@ -17,6 +17,9 @@ export function SliderRack() {
     <div className="flex flex-col gap-5">
       {config.sliders.map((def) => {
         const value = sound.sliders[def.key] ?? def.default;
+        const physical = def.physical_min === undefined || def.physical_max === undefined ? null :
+          def.logarithmic ? def.physical_min * (def.physical_max / def.physical_min) ** value :
+          def.physical_min + value * (def.physical_max - def.physical_min);
         return (
           <div key={def.key} className="group">
             <div className="mb-2 flex items-baseline justify-between">
@@ -35,9 +38,9 @@ export function SliderRack() {
                   setSlider(def.key, def.default);
                   commit();
                 }}
-                title="Reset to centre"
+                title="Reset to default"
               >
-                {Math.round(value * 100)}
+                {physical === null ? Math.round(value * 100) : `${physical < 2 ? physical.toFixed(2) : Math.round(physical)} ${def.unit ?? ""}`}
               </button>
             </div>
             <Slider

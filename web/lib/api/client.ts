@@ -5,7 +5,6 @@ import type {
   Health,
   InstrumentConfig,
   InstrumentsResponse,
-  Me,
   Sound,
   Spectrogram,
 } from "./types";
@@ -19,13 +18,11 @@ export class ApiError extends Error {
   }
 }
 
-export type TokenProvider = () => Promise<string | null>;
-
 /** Query string for a sound. Keys are sorted so equal sounds hit the API's cache. */
 export function soundQuery(sound: Sound): string {
   const params = new URLSearchParams();
   params.set("instrument", sound.instrument);
-  // The VAE stays implicit so existing presets keep their cache keys.
+  params.set("backend", sound.backend ?? "vae");
   if (sound.backend === "diffusion") {
     params.set("backend", "diffusion");
     if (sound.steps) params.set("steps", String(sound.steps));
@@ -43,18 +40,12 @@ export function soundQuery(sound: Sound): string {
 export class KicksApi {
   constructor(
     private readonly baseUrl: string = config.apiUrl,
-    private readonly token: TokenProvider = async () => null,
   ) {}
-
-  private async headers(extra: Record<string, string> = {}): Promise<HeadersInit> {
-    const token = await this.token();
-    return token ? { ...extra, Authorization: `Bearer ${token}` } : extra;
-  }
 
   private async request(path: string, init: RequestInit = {}): Promise<Response> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       ...init,
-      headers: { ...(await this.headers()), ...(init.headers ?? {}) },
+      headers: init.headers,
     });
     if (!res.ok) {
       let detail = res.statusText;
@@ -82,12 +73,8 @@ export class KicksApi {
   }
 
   config(instrument: string, backend: Backend = "vae") {
-    const query = `instrument=${encodeURIComponent(instrument)}${backend === "diffusion" ? "&backend=diffusion" : ""}`;
+    const query = `instrument=${encodeURIComponent(instrument)}&backend=${backend}`;
     return this.json<InstrumentConfig>(`/config?${query}`);
-  }
-
-  me() {
-    return this.json<Me>("/me");
   }
 
   /** Preview render: raw WAV bytes. Free, cached server-side. Aborting drops a queued diffusion render. */
@@ -104,19 +91,17 @@ export class KicksApi {
     return this.json<Spectrogram>(`/spectrogram?${soundQuery(sound)}`);
   }
 
-  /** Paid export: costs one credit, returns the file and the remaining balance. */
-  async exportSample(sound: Sound, idempotencyKey: string): Promise<ExportResult> {
+  /** Download the rendered sound as a 24-bit WAV. */
+  async exportSample(sound: Sound): Promise<ExportResult> {
     const res = await this.request(`/export?${soundQuery(sound)}`, {
       method: "POST",
-      headers: { "Idempotency-Key": idempotencyKey },
     });
     const disposition = res.headers.get("Content-Disposition") ?? "";
     const match = /filename="([^"]+)"/.exec(disposition);
     return {
       blob: await res.blob(),
       filename: match?.[1] ?? `${sound.instrument}.wav`,
-      remaining: Number(res.headers.get("X-Kicks-Credits-Remaining") ?? NaN),
-      exportId: res.headers.get("X-Kicks-Export-Id") ?? idempotencyKey,
+      exportId: res.headers.get("X-Kicks-Export-Id") ?? "",
     };
   }
 }
@@ -124,6 +109,5 @@ export class KicksApi {
 export interface ExportResult {
   blob: Blob;
   filename: string;
-  remaining: number;
   exportId: string;
 }

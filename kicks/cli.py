@@ -13,7 +13,7 @@ import typer
 
 app = typer.Typer(
     name="kicks",
-    help="VAE-powered drum synthesizer (kicks, snares, hi-hats).",
+    help="Local drum synthesis and analysis (DSP, VAE and waveform diffusion).",
     no_args_is_help=True,
 )
 
@@ -411,7 +411,8 @@ def promote(
 def serve(
     instrument: str = INSTRUMENT,
     port: int = typer.Option(8080, "--port", "-p", help="API port"),
-    host: str = typer.Option("0.0.0.0", "--host", help="API host"),
+    host: str = typer.Option("127.0.0.1", "--host", help="API host (loopback by default)"),
+    backend: str = typer.Option("auto", "--backend", help="Startup engine: auto, dsp, vae or diffusion; auto uses DSP when no model is available"),
     data: str = typer.Option(None, "--data", "-d", help="Override the corpus root directory"),
     griffin_lim: bool = typer.Option(False, "--griffin-lim", help="Use classical reconstruction (lower quality, no model download)"),
     vocoder: str = typer.Option(None, "--vocoder", help="Force one backend for every instrument: discoder, bigvgan or griffinlim (default: each profile's own)"),
@@ -431,6 +432,9 @@ def serve(
     from kicks.instruments import get_profile
 
     profile = get_profile(instrument)
+    if backend not in ("auto", "dsp", "vae", "diffusion"):
+        raise typer.BadParameter("backend must be auto, dsp, vae or diffusion")
+    os.environ["KICKS_BACKEND"] = backend
     os.environ["KICKS_INSTRUMENT"] = profile.name
     control = control or os.environ.get("KICKS_CONTROL", "descriptor")
     if control not in ("pca", "descriptor"):
@@ -647,3 +651,153 @@ def sweep(
         server=server, instrument=instrument, count=count,
         out_dir=out, seed=seed, json_out=json_out,
     )
+
+
+@app.command("dsp-presets")
+def dsp_presets(instrument: str = INSTRUMENT):
+    """Inspect physical control units, ranges and built-in presets."""
+    from dataclasses import asdict
+    import json
+    from kicks.instruments import get_profile
+    profile = get_profile(instrument)
+    print(json.dumps(asdict(profile.procedural), indent=2))
+
+
+@app.command("dsp-generate")
+def dsp_generate(
+    instrument: str = INSTRUMENT,
+    count: int = typer.Option(4, "--count", "-n", min=1),
+    out: str = typer.Option("output/dsp", "--out", "-o"),
+    preset: str = typer.Option(None, "--preset", help="Built-in preset name; inspect with dsp-presets"),
+    seed: int = typer.Option(0, "--seed", min=0, max=4294967295),
+    param: list[str] = typer.Option(None, "--param", metavar="KEY=VALUE", help="Physical parameter in its own units; repeatable"),
+    texture: str = typer.Option(None, "--texture", help="Optional local recording for sample-assisted synthesis"),
+    texture_mix: float = typer.Option(.25, "--texture-mix", min=0, max=1),
+):
+    """Generate seeded 24-bit drum WAVs and reproducible JSON presets; no model needed."""
+    from kicks.synthesis.procedural import generate_dsp
+    values = {}
+    for item in param or []:
+        key, sep, value = item.partition('=')
+        try:
+            if not sep:
+                raise ValueError('expected KEY=VALUE')
+            values[key] = float(value)
+        except ValueError as exc:
+            raise typer.BadParameter(f'invalid physical parameter {item!r}: {exc}') from exc
+    try:
+        paths = generate_dsp(instrument=instrument, count=count, out_dir=out, seed=seed,
+                             preset=preset, parameters=values, texture_path=texture, texture_mix=texture_mix)
+    except (ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    for path in paths:
+        print(path)
+
+
+@app.command("benchmark-freeze")
+def benchmark_freeze(
+    data: str = typer.Option("data", "--data", help="Root containing kicks, snares and hihats"),
+    out: str = typer.Option("output/benchmarks/corpus.json", "--out", "-o"),
+    registry: str = typer.Option("data/corpus_ids.json", "--registry"),
+    groups: str = typer.Option(None, "--groups", help="JSON label overrides keyed by corpus/filename"),
+    seed: int = typer.Option(42, "--seed"),
+):
+    """Hash corpus bytes, group source packs/duplicates, freeze splits and provenance."""
+    from collections import Counter
+    from kicks.analysis.benchmark import freeze_corpus
+    result = freeze_corpus(data, out, registry=registry, groups=groups, seed=seed)
+    print(f"Manifest {result['sha256']}: {len(result['rows'])} hits -> {out}")
+    print(dict(Counter(r['split'] for r in result['rows'])))
+    for warning in result['warnings']:
+        print(f"Warning: {warning}")
+
+
+@app.command("benchmark-dsp")
+def benchmark_dsp(
+    instrument: str = INSTRUMENT,
+    out: str = typer.Option(..., "--out", "-o"),
+    settings: int = typer.Option(24, "--settings", min=1),
+    seeds: int = typer.Option(3, "--seeds", min=1),
+    texture: str = typer.Option(None, "--texture"),
+    texture_mix: float = typer.Option(.25, "--texture-mix", min=0, max=1),
+):
+    """Render physical-control probes, measure integrity and warm/cold latency."""
+    import json
+    from kicks.analysis.benchmark import run_dsp_benchmark
+    result = run_dsp_benchmark(instrument or 'kick', out, settings=settings, seeds=seeds,
+                               texture_path=texture, texture_mix=texture_mix)
+    print(json.dumps(result['summary'], indent=2))
+
+
+@app.command("listening-compare")
+def listening_compare(
+    left: str = typer.Option(..., "--left", help="First benchmark directory"),
+    right: str = typer.Option(..., "--right", help="Second benchmark directory with identical conditions"),
+    out: str = typer.Option(..., "--out", "-o", help="Use output/fidelity/NAME for dashboard discovery"),
+    seed: int = typer.Option(42, "--seed"),
+):
+    """Prepare blind full-band and HF A/B pairs of matched-condition generations."""
+    from kicks.analysis.benchmark import listening_comparison
+    result = listening_comparison(left, right, out, seed=seed)
+    print(f"{result['summary']['pairs']} blind pairs in {out}/listening; no listening judgments yet")
+
+
+@app.command("benchmark-audio")
+def benchmark_audio(
+    generated: str = typer.Option(..., "--generated", "-g"),
+    instrument: str = INSTRUMENT,
+    out: str = typer.Option(..., "--out", "-o"),
+    pattern: str = typer.Option("*.wav", "--pattern"),
+    backend: str = typer.Option("external", "--backend"),
+    targets: str = typer.Option(None, "--targets", help="Raw descriptor targets keyed by WAV filename"),
+    paired_reference: str = typer.Option(None, "--paired-reference", help="Explicit reconstruction sources, with identical filenames"),
+):
+    """Use the same final-waveform audit for VAE, diffusion or external generators."""
+    import json
+    from kicks.analysis.benchmark import audit_directory
+    report = audit_directory(generated, instrument or 'kick', out=out, pattern=pattern, backend=backend,
+                             targets=targets, reference_directory=paired_reference)
+    print(json.dumps(report['summary'], indent=2))
+
+
+@app.command("dsp-fit")
+def dsp_fit(
+    manifest: str = typer.Option(..., "--manifest"),
+    instrument: str = INSTRUMENT,
+    out: str = typer.Option(..., "--out", "-o"),
+    count: int = typer.Option(8, "--count", "-n", min=1),
+    evaluations: int = typer.Option(64, "--evaluations", min=8),
+    seed: int = typer.Option(42, "--seed", min=0, max=4294967295),
+):
+    """Fit physical parameters on the training fold, with a strict per-hit budget."""
+    from kicks.synthesis.fitting import fit_corpus
+    result = fit_corpus(manifest, instrument or 'kick', out=out, count=count, evaluations=evaluations, seed=seed)
+    print(f"Fitted {len(result['fits'])} training hits -> {out}")
+
+
+@app.command("dsp-sample-bank")
+def dsp_sample_bank(
+    bank: str = typer.Option(..., "--bank"),
+    out: str = typer.Option(..., "--out", "-o"),
+    count: int = typer.Option(4, "--count", "-n", min=1),
+    seed: int = typer.Option(0, "--seed", min=0, max=4294967295),
+    jitter: float = typer.Option(.02, "--jitter", min=0, max=.1),
+):
+    """Sample the joint fitted parameter bank with bounded local variation."""
+    from kicks.synthesis.fitting import sample_bank
+    print(f"Wrote {sample_bank(bank, count, out=out, seed=seed, jitter=jitter)} hits -> {out}")
+
+
+@app.command("codec-audit")
+def codec_audit(
+    checkpoint: str = typer.Option(..., "--checkpoint", help="Local matched DAC checkpoint; never downloaded automatically"),
+    manifest: str = typer.Option(..., "--manifest"),
+    instrument: str = INSTRUMENT,
+    out: str = typer.Option(..., "--out", "-o"),
+    split: str = typer.Option("test", "--split"),
+    count: int = typer.Option(8, "--count", "-n", min=1),
+):
+    """Measure a matched codec's held-out reconstruction ceiling before prior training."""
+    from kicks.analysis.codec_audit import audit_codec
+    result = audit_codec(checkpoint, manifest, instrument or 'hihat', out=out, split=split, count=count)
+    print(f"Audited {len(result['samples'])} {split} hits -> {out}")

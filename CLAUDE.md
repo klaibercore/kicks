@@ -2,7 +2,7 @@
 
 ## Scope and source of truth
 
-- Project: profile-driven drum synthesis, VAE training, audio evaluation, a FastAPI backend, a static Next.js studio, and optional Supabase/Stripe accounts.
+- Project: profile-driven drum synthesis, VAE training, audio evaluation, a FastAPI backend, a static Next.js studio, and procedural drum synthesis. The app is local, with no accounts, billing or sales surfaces.
 - Human setup and product guide: `README.md`. Experiment sequence and research rationale: `docs/high-fidelity-generation.md`. Snare/hi-hat identity controls and their measured audit: `docs/audio-identity-plan.md`. Waveform diffusion backend, its 8 GB Apple Silicon measurements and known issues: `docs/waveform-diffusion.md`.
 - Read current code and `git diff` before changing behavior. Local corpora, checkpoints and active jobs can change independently of Git; inspect them before making claims about the current model.
 - Preserve unrelated work. Do not restart an existing training process to attach telemetry.
@@ -47,9 +47,9 @@ uv run pytest -q
 
 Instrument-aware commands use `-i` / `--instrument`; commands such as `dashboard`, `instruments` and `publish-analysis` do not take that option. Script arguments differ: `scripts/validate_controls.py` uses `--instrument`, not `-i`.
 
-Website, from `web/`: `pnpm install`, `pnpm dev` (:3000), `pnpm lint`, `pnpm build` (static export to `out/`). Use a static server for the production export; do not rely on `next start` for it.
+Website, from `web/`: `pnpm install`, `pnpm dev` (:3000), `pnpm lint`, `pnpm build` (static export to `out/`). Use a static server to inspect the export.
 
-`docker compose up --build` serves the API with mounted data/models/output. The supplied Compose file reserves an NVIDIA GPU; adapt that reservation for other hosts.
+The API defaults to loopback. `kicks serve --backend dsp` starts without samples or neural weights. Physical controls have explicit units and are not descriptor targets.
 
 ## Required training workflow
 
@@ -206,7 +206,7 @@ Notebook keys: `objective`, `hypothesis`, `success_criteria`, `observations`, `d
 | `synthesis/identity.py`, `synthesis/controlled.py` | Corpus-anchored `IdentityBasis` (radius 4, ±6 dB correction cap, `.identity.npz` cache) and the single rendering path shared by studio previews, exports and the control audit |
 | `synthesis/diffusion.py` | Descriptor targets resampled from the checkpoint's label bank (nearest rows when pinned); sampling with separate texture and slider seeds |
 | `corpus/` | Backed-up stripping; quarantine with a manifest |
-| `api/` | FastAPI routes, lazy instrument/backend caches, auth, credits, rate limiting |
+| `api/` | Local FastAPI routes, lazy instrument/backend caches, WAV export and rate limiting |
 | `cli.py`, `sweep.py` | Lazy command implementations; API control-space sweep |
 
 Paths in the table are relative to `kicks/`.
@@ -236,17 +236,13 @@ Paths in the table are relative to `kicks/`.
 - Backends share highpass/lowpass, peak normalization and tail gating. Benchmark the actual generation/control path; reconstruction-only vocoder rankings do not establish generation quality.
 - Root overrides: `KICKS_DATA_DIR`, `KICKS_MODEL_DIR`, `KICKS_OUTPUT_DIR`. Default instrument: `KICKS_INSTRUMENT` (fallback kick). Controls: `KICKS_CONTROL=descriptor|pca` (default descriptor); with `descriptor`, profiles that set `identity_controls` use the corpus-anchored basis. `scripts/validate_controls.py --control identity|legacy` selects the algorithm explicitly for audits only.
 
-## API, web and hosted services
+## API and local web app
 
 - `ServerState` loads instruments lazily. Vocoders cache by `(backend, weights_dir)`; `/health` reports profile mode and a backend map unless forced. Serving instances do not hot-reload promoted checkpoints.
-- Routes: `/health`, `/instruments`, `/config`, `/generate`, `/evaluate`, `/spectrogram`, `/me`, `POST /export`. Synthesis requests select `instrument`; `/spectrogram` is pre-vocoder, `/evaluate` scores rendered/effected audio. `backend=diffusion` (with `steps` 10–200) routes `/config`, `/generate`, `/evaluate`, `/spectrogram` and `/export` to a served diffusion checkpoint: sliders map by quantile onto the checkpoint's label bank (1st–99th percentile, median at centre), renders are peak-normalised to 0.9, walked one at a time off the event loop, cached apart from effects, and dropped if the client left while queued; `/spectrogram` is then the mel of the render.
+- Routes: `/health`, `/instruments`, `/config`, `/generate`, `/evaluate`, `/spectrogram`, `POST /export`. Exports are local 24-bit WAV downloads. Synthesis requests select `instrument`; `/spectrogram` is pre-vocoder, `/evaluate` scores rendered/effected audio. `backend=diffusion` (with `steps` 10–200) routes `/config`, `/generate`, `/evaluate`, `/spectrogram` and `/export` to a served diffusion checkpoint: sliders map by quantile onto the checkpoint's label bank (1st–99th percentile, median at centre), renders are peak-normalised to 0.9, walked one at a time off the event loop, cached apart from effects, and dropped if the client left while queued; `/spectrogram` is then the mel of the render.
 - Sliders accept `s1..sN`, legacy `pc1..pcN`, or exposed names. With PCA, map names through `SliderBasis.names`; labels are discovered during fitting. Effects: `attack_ms`, `decay_ms`, `drive`, `filter`.
 - Shared token bucket: 10 requests/second; LRU: 100 entries, keyed by query. `web/lib/api/` sorts sound query keys for consistent caching.
-- Auth defaults off without `KICKS_SUPABASE_URL`, required with it; `KICKS_AUTH_MODE` supports required/optional/off. `/me` and `/export` require a user. Export charges one credit; `Idempotency-Key` deduplicates ledger charging.
-- Supabase tokens verify locally via JWKS or optional legacy `KICKS_SUPABASE_JWT_SECRET`. `KICKS_SUPABASE_SERVICE_KEY` is server-only. CORS comes from comma-separated `KICKS_CORS_ORIGINS` (default localhost:3000).
 - `web/`: Next.js 16 / React 19, static export, Tailwind 4, shadcn on Base UI. Use Base UI `render={<Link/>}` composition, not Radix `asChild`. Routes use trailing `/`. Studio is client-only for AudioContext/MIDI/localStorage. Respect the React Compiler lint rules.
-- `.github/workflows/pages.yml` is currently manual (`workflow_dispatch`). Public build variables configure API, Supabase anon access, analytics and legal-page operator details. API hosting is separate.
-- Never put service-role or Stripe secrets under `web/`; `NEXT_PUBLIC_*` ships to browsers. Preserve row-level security, service-only credit writes, append-only ledger and idempotent Stripe webhook handling in `supabase/`.
 - Public `web/public/analysis/*.json` must not expose corpus filenames/paths. Full local fidelity reports include them; do not publish those as public analytics.
 - `scripts/fetch_drum_abuse.py [kick|snare|hihat|all]` downloads/deduplicates into `data/_staging/<plural>/abuse/`. Staging is not automatic corpus integration.
 
@@ -257,7 +253,6 @@ Paths in the table are relative to `kicks/`.
 - Tracking/dashboard: `uv run pytest -q tests/test_training_tracking.py`; inspect desktop/mobile charts, live updates, note preservation and standalone HTML when UI behavior changes. The viewer serves both backends, so check a VAE run and a diffusion run, plus the Listening lab against a real `output/fidelity/*` report. The template is read per request, so HTML edits are live at once; server-side changes in `tracking.py` need the viewer restarted (the training process is separate and keeps its own copy). Fidelity detail responses include corpus sample paths — the viewer is loopback-only and never a publication path.
 - Waveform diffusion: `uv run pytest -q tests/test_diffusion.py tests/test_make_subset.py tests/test_diffusion_listening.py tests/test_modal_train.py tests/test_rename_corpus.py`. The Modal wrapper tests cover its local contracts only (corpus verification, spec validation, the restart guard, periodic commits, note-preserving sync); cloud behaviour is established by the reviewed gates in `docs/modal-training.md`. The tests cover the schedule, conditioning, target drawing, determinism, checkpoints, the tracked loop, subset building and the listening-pair writer only; they establish nothing about how the backend sounds. Evidence for this backend is `kicks eval --pattern`, the direct tail-floor / onset measurements and blind pairs from `scripts/diffusion_listening.py` (a generation A/B with `held_out: false`, never a reconstruction fidelity report); `kicks fidelity` and `scripts/validate_controls.py` are VAE-only.
 - Controls/calibration/vocoders: relevant `tests/test_audio_controls.py` / `tests/test_discoder.py`; use matched waveform/control audits when claiming audio improvement. For snare/hi-hat identity changes, rerun `scripts/validate_controls.py --control identity --texture-seeds ...` and `scripts/compare_identity.py`, and report multi-onset counts and target errors separately for centre, axis and random probes.
-- API/auth/publication: `tests/test_api_auth.py`, `tests/test_publish.py`; full Python regression command is `uv run pytest -q`.
 - Website: from `web/`, `pnpm lint` then `pnpm build`; inspect affected views. Publishing generated analysis is a separate write step, not part of ordinary lint/build checks.
 - Report what was actually measured. Automated checks, proxy scores and listening evidence are separate claims.
 
@@ -270,3 +265,14 @@ Rules:
 - If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+
+## Procedural synthesis and research tools
+
+- `kicks/instruments/voices.py` defines physical units, ranges and presets; profiles carry the voice spec.
+- `kicks/synthesis/procedural.py` renders seeded oversampled voices, texture-assisted hybrids and hash-bound presets. It imports no Torch/model code.
+- `kicks/analysis/benchmark.py` freezes corpus bytes and source/duplicate groups, audits final audio and writes matched-condition blind comparisons. Generation is never labelled paired reconstruction.
+- `kicks/synthesis/fitting.py` fits physical parameters with a strict evaluation budget; corpus fitting uses the manifest training fold only. Sampling the resulting joint empirical prior is not neural training.
+- `kicks/analysis/codec_audit.py` requires a local matched 44.1 kHz DAC artifact and an actual validation/test fold. No automatic download or training-set fallback.
+- Studio kits persist locally, with named saves and validated JSON import/export. `web/tests/studio.test.mjs` checks render query identity, choke groups, cache bounds and kit validation.
+- Test new synthesis with `uv run pytest -q tests/test_procedural.py tests/test_benchmark.py tests/test_api_procedural.py tests/test_api_diffusion.py`; then run the full suite. Website checks are `pnpm lint`, `pnpm test`, `pnpm build`.
+- Numerical audits establish integrity, timing and control behavior. No engine is certified as higher audio quality without listening evidence.

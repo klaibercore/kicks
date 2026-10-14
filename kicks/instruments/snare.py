@@ -13,6 +13,7 @@ shell rather than the bottom two octaves.
 """
 
 from .metrics import standard_metrics
+from .voices import SNARE
 from .profile import (
     DescriptorSpec,
     EvalWindows,
@@ -64,6 +65,7 @@ DESCRIPTORS = (
 )
 
 PROFILE = InstrumentProfile(
+    procedural=SNARE,
     name="snare",
     display_name="Snare",
     noun="snare",

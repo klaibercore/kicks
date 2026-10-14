@@ -1,6 +1,7 @@
 """Kick profile with gain-invariant, audible-band control measurements."""
 
 from .metrics import standard_metrics
+from .voices import KICK
 from .profile import (
     DescriptorSpec,
     InstrumentProfile,
@@ -48,6 +49,7 @@ DESCRIPTORS = (
 )
 
 PROFILE = InstrumentProfile(
+    procedural=KICK,
     name="kick",
     display_name="Kick",
     noun="kick",

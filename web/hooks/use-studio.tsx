@@ -11,7 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import { toast } from "sonner";
-import { ApiError, soundQuery } from "@/lib/api/client";
+import { ApiError, KicksApi, soundQuery } from "@/lib/api/client";
 import type {
   Backend,
   Effects,
@@ -23,7 +23,8 @@ import type {
   Spectrogram,
 } from "@/lib/api/types";
 import { engine } from "@/lib/audio/engine";
-import { useAuth } from "@/hooks/use-auth";
+
+const api = new KicksApi();
 
 export type ApiStatus = "connecting" | "online" | "offline";
 
@@ -41,6 +42,7 @@ interface StudioContextValue {
   sound: Sound | null;
   config: InstrumentConfig | null;
   setSteps: (steps: number) => void;
+  applyPreset: (sliders: Record<string, number>) => void;
   setSlider: (key: string, value: number) => void;
   setEffect: <K extends keyof Effects>(key: K, value: Effects[K]) => void;
   reset: () => void;
@@ -78,10 +80,11 @@ function centredSound(config: InstrumentConfig): Sound {
     sliders: Object.fromEntries(config.sliders.map((s) => [s.key, s.default])),
     effects: {},
   };
-  if (config.backend === "diffusion") {
-    sound.backend = "diffusion";
+  if (config.backend && config.backend !== "vae") {
+    sound.backend = config.backend;
     sound.steps = config.steps?.default;
   }
+  if (config.choke_group) sound.choke_group = config.choke_group;
   return sound;
 }
 
@@ -97,7 +100,6 @@ function slotKey(instrument: string, backend: Backend): string {
 }
 
 export function StudioProvider({ children }: { children: ReactNode }) {
-  const { api, user, enabled: authEnabled, refreshCredits } = useAuth();
   const [status, setStatus] = useState<ApiStatus>("connecting");
   const [health, setHealth] = useState<Health | null>(null);
   const [instruments, setInstruments] = useState<InstrumentInfo[]>([]);
@@ -109,7 +111,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   const [rendering, setRendering] = useState(false);
   const [renderMs, setRenderMs] = useState<number | null>(null);
   // Diffusion renders take seconds, so auditioning every slider release is opt-in there.
-  const [autoAuditionBy, setAutoAuditionBy] = useState<Record<Backend, boolean>>({ vae: true, diffusion: false });
+  const [autoAuditionBy, setAutoAuditionBy] = useState<Record<Backend, boolean>>({ vae: true, diffusion: false, dsp: true });
   const [evaluation, setEvaluation] = useState<Evaluation | null>(null);
   const [evaluating, setEvaluating] = useState(false);
   const [spectrogram, setSpectrogram] = useState<Spectrogram | null>(null);
@@ -143,7 +145,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [api]);
+  }, []);
 
   const backends = useMemo(() => backendsOf(instruments.find((i) => i.name === active)), [instruments, active]);
   const backend: Backend = (active && chosenBackends[active]) || backends[0] || "vae";
@@ -166,7 +168,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [active, backend, slot, api, configs]);
+  }, [active, backend, slot, configs]);
 
   const sound = slot ? (sounds[slot] ?? null) : null;
   const config = slot ? (configs[slot] ?? null) : null;
@@ -186,7 +188,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       engine.remember(key, decoded);
       return decoded;
     },
-    [api],
+    [],
   );
 
   const preview = useCallback(
@@ -211,9 +213,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
         return decoded;
       } catch (err) {
         if (controller.signal.aborted) return null;
-        if (err instanceof ApiError && err.status === 401) {
-          toast.error("Sign in to use the synthesizer.");
-        } else if (err instanceof ApiError && err.status === 429) {
+        if (err instanceof ApiError && err.status === 429) {
           toast.warning("Slow down — the renderer is rate-limited.");
         } else {
           toast.error(err instanceof Error ? err.message : "Render failed.");
@@ -252,6 +252,11 @@ export function StudioProvider({ children }: { children: ReactNode }) {
 
   const setSlider = useCallback(
     (key: string, value: number) => update((s) => ({ ...s, sliders: { ...s.sliders, [key]: value } })),
+    [update],
+  );
+
+  const applyPreset = useCallback(
+    (sliders: Record<string, number>) => update((s) => ({ ...s, sliders: { ...sliders } })),
     [update],
   );
 
@@ -316,7 +321,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     } finally {
       setEvaluating(false);
     }
-  }, [api, sound]);
+  }, [sound]);
 
   const loadSpectrogram = useCallback(async () => {
     if (!sound) return;
@@ -327,43 +332,26 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not load the spectrogram.");
     }
-  }, [api, sound]);
+  }, [sound]);
 
   const exportSample = useCallback(async () => {
     if (!sound) return;
-    if (authEnabled && !user) {
-      toast.error("Sign in to export samples.");
-      return;
-    }
     setExporting(true);
     try {
-      const result = await api.exportSample(sound, crypto.randomUUID());
+      const result = await api.exportSample(pendingSound.current ?? sound);
       const url = URL.createObjectURL(result.blob);
       const a = document.createElement("a");
       a.href = url;
       a.download = result.filename;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 10_000);
-      await refreshCredits();
-      toast.success(
-        Number.isFinite(result.remaining)
-          ? `Exported ${result.filename} — ${result.remaining} credit${result.remaining === 1 ? "" : "s"} left.`
-          : `Exported ${result.filename}.`,
-      );
+      toast.success(`Exported ${result.filename}.`);
     } catch (err) {
-      if (err instanceof ApiError && err.status === 402) {
-        toast.error("No credits left.", {
-          description: "Buy a pack on the pricing page to export samples.",
-        });
-      } else if (err instanceof ApiError && err.status === 503) {
-        toast.error("Exports are not enabled on this server.");
-      } else {
-        toast.error(err instanceof Error ? err.message : "Export failed.");
-      }
+      toast.error(err instanceof Error ? err.message : "Export failed.");
     } finally {
       setExporting(false);
     }
-  }, [api, sound, authEnabled, user, refreshCredits]);
+  }, [sound]);
 
   const setActive = useCallback((name: string) => {
     pendingSound.current = null;
@@ -395,7 +383,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   const value = useMemo<StudioContextValue>(
     () => ({
       status, health, instruments, configs, active, setActive, backends, backend, setBackend,
-      sound, config, setSteps,
+      sound, config, setSteps, applyPreset,
       setSlider, setEffect, reset, randomize, newVariation, loadSound,
       buffer, rendering, renderMs, preview, autoAudition, setAutoAudition, commit,
       evaluation, evaluating, evaluate, spectrogram, loadSpectrogram,
@@ -403,7 +391,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     }),
     [
       status, health, instruments, configs, active, setActive, backends, backend, setBackend,
-      sound, config, setSteps,
+      sound, config, setSteps, applyPreset,
       setSlider, setEffect, reset, randomize, newVariation, loadSound,
       buffer, rendering, renderMs, preview, autoAudition, setAutoAudition, commit,
       evaluation, evaluating, evaluate, spectrogram, loadSpectrogram,

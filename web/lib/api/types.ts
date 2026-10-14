@@ -1,7 +1,7 @@
 export type InstrumentName = string;
 
 /** How a sound is synthesised: the VAE and a vocoder, or the waveform diffusion model. */
-export type Backend = "vae" | "diffusion";
+export type Backend = "vae" | "diffusion" | "dsp";
 
 export interface InstrumentInfo {
   name: InstrumentName;
@@ -12,6 +12,7 @@ export interface InstrumentInfo {
   loaded: boolean;
   /** Backends this server can render the instrument with. Older servers omit it. */
   backends?: Backend[];
+  choke_group?: string | null;
 }
 
 export interface InstrumentsResponse {
@@ -30,6 +31,10 @@ export interface SliderDef {
   description?: string;
   target_min?: number;
   target_max?: number;
+  physical_min?: number;
+  physical_max?: number;
+  unit?: string;
+  logarithmic?: boolean;
 }
 
 export interface InstrumentConfig {
@@ -41,11 +46,14 @@ export interface InstrumentConfig {
   backend?: Backend;
   /** The vocoder this instrument renders with; "none" for diffusion. */
   vocoder: string;
-  control: "pca" | "descriptor";
+  control: "pca" | "descriptor" | "physical";
   /** Supports a stable drum texture independently of slider settings. */
   variation?: boolean;
   /** Diffusion only: the sampler-step range the server accepts. */
   steps?: { default: number; min: number; max: number };
+  presets?: { name: string; sliders: Record<string, number> }[];
+  choke_group?: string | null;
+  renderer_version?: string;
   /** Diffusion only: which checkpoint is served. */
   checkpoint?: { name: string; epoch: number | null; run_id: string | null };
 }
@@ -97,13 +105,8 @@ export interface Health {
   cached_responses: number;
   /** Instruments served with a diffusion checkpoint. */
   diffusion?: string[];
-  auth: { mode: "required" | "optional" | "off"; billing: boolean };
-}
-
-export interface Me {
-  id: string;
-  email: string | null;
-  credits: number | null;
+  default_backend?: Backend;
+  dsp?: string[];
 }
 
 /** Effects the API applies after the vocoder. Undefined = not sent = off. */
@@ -117,6 +120,7 @@ export interface Effects {
 /** A complete, reproducible sound: which instrument, where every slider sits, which effects. */
 export interface Sound {
   instrument: InstrumentName;
+  choke_group?: string;
   /** Omitted for the VAE, which older presets always used. */
   backend?: Backend;
   /** Diffusion sampler steps; omitted means the server default. */

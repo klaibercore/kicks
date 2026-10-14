@@ -10,6 +10,8 @@ class AudioEngine {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
   private readonly buffers = new Map<string, AudioBuffer>();
+  private readonly voices = new Set<{ source: AudioBufferSourceNode; gain: GainNode }>();
+  private readonly groups = new Map<string, { source: AudioBufferSourceNode; gain: GainNode }>();
 
   get context(): AudioContext {
     if (!this.ctx) {
@@ -33,7 +35,7 @@ class AudioEngine {
   }
 
   remember(key: string, buffer: AudioBuffer): void {
-    if (this.buffers.size > 256) {
+    if (!this.buffers.has(key) && this.buffers.size >= 256) {
       const oldest = this.buffers.keys().next().value;
       if (oldest !== undefined) this.buffers.delete(oldest);
     }
@@ -41,7 +43,7 @@ class AudioEngine {
   }
 
   /** Fire-and-forget one-shot. Velocity in [0, 1] maps to a perceptual gain curve. */
-  play(buffer: AudioBuffer, velocity = 1): AudioBufferSourceNode {
+  play(buffer: AudioBuffer, velocity = 1, chokeGroup?: string): AudioBufferSourceNode {
     const ctx = this.context;
     const source = ctx.createBufferSource();
     source.buffer = buffer;
@@ -49,8 +51,33 @@ class AudioEngine {
     gain.gain.value = Math.pow(Math.max(0, Math.min(1, velocity)), 1.6);
     source.connect(gain);
     gain.connect(this.master!);
+    const voice = { source, gain };
+    if (chokeGroup) {
+      const previous = this.groups.get(chokeGroup);
+      if (previous) this.release(previous);
+      this.groups.set(chokeGroup, voice);
+    }
+    this.voices.add(voice);
+    source.onended = () => {
+      this.voices.delete(voice);
+      if (chokeGroup && this.groups.get(chokeGroup) === voice) this.groups.delete(chokeGroup);
+      source.disconnect(); gain.disconnect();
+    };
     source.start();
     return source;
+  }
+
+  private release(voice: { source: AudioBufferSourceNode; gain: GainNode }): void {
+    const now = this.context.currentTime;
+    voice.gain.gain.cancelScheduledValues(now);
+    voice.gain.gain.setValueAtTime(voice.gain.gain.value, now);
+    voice.gain.gain.linearRampToValueAtTime(0, now + 0.005);
+    voice.source.stop(now + 0.006);
+  }
+
+  stopAll(): void {
+    for (const voice of this.voices) this.release(voice);
+    this.groups.clear();
   }
 }
 

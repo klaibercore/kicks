@@ -32,6 +32,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field, replace
 from typing import Literal
+from .voices import VoiceSpec
 
 import numpy as np
 
@@ -426,6 +427,7 @@ class InstrumentProfile:
     #: profile for the audit that picked it. ``KICKS_VOCODER`` / ``--vocoder``
     #: still force one backend for every instrument (e.g. Griffin-Lim on CPU).
     vocoder: str = "discoder"
+    procedural: VoiceSpec | None = None
 
     # -- descriptors --------------------------------------------------------
 

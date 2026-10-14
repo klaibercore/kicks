@@ -42,7 +42,7 @@ export function SpectrogramView({ spec, className }: { spec: Spectrogram | null;
       className={className}
       style={{ imageRendering: "pixelated" }}
       role="img"
-      aria-label="Decoded mel spectrogram"
+      aria-label="Mel spectrogram of the current sound"
     />
   );
 }

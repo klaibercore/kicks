@@ -13,6 +13,7 @@ decay-length difference (~60 ms versus ~300 ms and up).
 """
 
 from .metrics import standard_metrics
+from .voices import HIHAT
 from .profile import (
     DescriptorSpec,
     EvalWindows,
@@ -65,6 +66,7 @@ DESCRIPTORS = (
 )
 
 PROFILE = InstrumentProfile(
+    procedural=HIHAT,
     name="hihat",
     display_name="Hi-Hat",
     noun="hi-hat",

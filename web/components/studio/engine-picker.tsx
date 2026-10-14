@@ -4,7 +4,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useStudio } from "@/hooks/use-studio";
 import type { Backend } from "@/lib/api/types";
 
-const LABELS: Record<Backend, string> = { vae: "VAE", diffusion: "Diffusion" };
+const LABELS: Record<Backend, string> = { vae: "VAE", diffusion: "Diffusion", dsp: "Synth" };
 
 /** Sampler-step presets offered in the studio; the API accepts any integer in its range. */
 const STEP_PRESETS = [25, 50, 100, 200];
@@ -15,7 +15,7 @@ const STEP_PRESETS = [25, 50, 100, 200];
  * (`kicks serve --diffusion hihat=PATH`), never by default.
  */
 export function EnginePicker() {
-  const { backends, backend, setBackend, config, sound, setSteps, commit, renderMs } = useStudio();
+  const { backends, backend, setBackend, config, sound, setSteps, applyPreset, commit, renderMs } = useStudio();
   if (backends.length === 0 || (backends.length === 1 && backends[0] === "vae")) return null;
 
   const range = config?.steps;
@@ -36,6 +36,15 @@ export function EnginePicker() {
           </TabsList>
         </Tabs>
       </div>
+
+      {backend === "dsp" && config?.presets ? (
+        <div className="flex flex-wrap gap-2" aria-label="Synth presets">
+          {config.presets.map((preset) => (
+            <button key={preset.name} type="button" className="rounded-md border border-border px-3 py-1.5 text-xs capitalize hover:bg-muted"
+              onClick={() => { applyPreset(preset.sliders); commit(); }}>{preset.name}</button>
+          ))}
+        </div>
+      ) : null}
 
       {backend === "diffusion" && config?.backend === "diffusion" ? (
         <>

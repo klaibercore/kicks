@@ -1,7 +1,6 @@
 "use client";
 
 import { AlertCircleIcon } from "lucide-react";
-import Link from "next/link";
 import { useCallback, useState } from "react";
 import { EffectsRack } from "@/components/studio/effects-rack";
 import { EnginePicker } from "@/components/studio/engine-picker";
@@ -19,7 +18,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useAuth } from "@/hooks/use-auth";
 import { useKit } from "@/hooks/use-kit";
 import { backendsOf, StudioProvider, useStudio } from "@/hooks/use-studio";
 import { config } from "@/lib/config";
@@ -35,7 +33,6 @@ export function Studio() {
 
 function StudioBody() {
   const studio = useStudio();
-  const { enabled: authEnabled, user, ready } = useAuth();
   const kit = useKit();
   const [learning, setLearning] = useState<number | null>(null);
 
@@ -71,7 +68,6 @@ function StudioBody() {
     );
   }
 
-  const needsSignIn = authEnabled && ready && !user && studio.health?.auth.mode === "required";
   const diffusion = studio.backend === "diffusion";
 
   return (
@@ -85,7 +81,9 @@ function StudioBody() {
         </div>
         {studio.health ? (
           <div className="flex flex-wrap gap-1.5 font-mono text-[11px]">
-            {diffusion ? (
+            {studio.backend === "dsp" ? (
+              <Badge variant="outline">DSP synthesis</Badge>
+            ) : diffusion ? (
               <>
                 <Badge variant="outline">diffusion</Badge>
                 <Badge variant="outline">{studio.sound?.steps ?? studio.config?.steps?.default ?? "—"} steps</Badge>
@@ -96,23 +94,10 @@ function StudioBody() {
                 <Badge variant="outline">{studio.config?.variation ? "Corpus texture" : `${studio.health.control} basis`}</Badge>
               </>
             )}
-            <Badge variant="outline">{studio.health.device}</Badge>
+            <Badge variant="outline">{studio.backend === "dsp" ? "cpu" : studio.health.device}</Badge>
           </div>
         ) : null}
       </div>
-
-      {needsSignIn ? (
-        <Alert>
-          <AlertCircleIcon />
-          <AlertTitle>Sign in to render sounds</AlertTitle>
-          <AlertDescription>
-            <p>Previews are free for signed-in users; exporting a WAV costs one credit.</p>
-            <Button size="sm" className="mt-2" render={<Link href="/login/" />}>
-              Sign in
-            </Button>
-          </AlertDescription>
-        </Alert>
-      ) : null}
 
       <Tabs value={studio.active ?? ""} onValueChange={(v) => v && studio.setActive(v as string)}>
         <TabsList variant="line" className="h-9">
@@ -158,7 +143,9 @@ function StudioBody() {
             <CardHeader>
               <CardTitle>Render</CardTitle>
               <CardDescription>
-                {diffusion
+                {studio.backend === "dsp"
+                  ? "The synthesized waveform for the current controls."
+                  : diffusion
                   ? "What the diffusion model produced for the current settings. No vocoder is involved."
                   : "What the vocoder produced for the current settings."}
               </CardDescription>
@@ -167,7 +154,7 @@ function StudioBody() {
               <WaveformView buffer={studio.buffer} className="h-28 w-full" />
               <div className="flex items-center justify-between">
                 <h3 className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
-                  {diffusion ? "Spectrogram of the render" : "Decoded spectrogram"}
+                  {studio.backend !== "vae" ? "Spectrogram of the render" : "Decoded spectrogram"}
                 </h3>
                 <Button size="xs" variant="ghost" onClick={() => void studio.loadSpectrogram()} disabled={!studio.sound}>
                   {studio.spectrogram ? "Refresh" : "Show"}
