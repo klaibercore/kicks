@@ -26,7 +26,7 @@ export function parseKit(value: unknown): Kit {
     if (!pad || pad.index !== index || !Number.isInteger(pad.note) || pad.note < 0 || pad.note > 127 || typeof pad.key !== "string" || pad.key.length !== 1 || (pad.name !== null && (typeof pad.name !== "string" || pad.name.length > 120))) throw new Error("Invalid pad");
     const s = pad.sound;
     if (s !== null) {
-      if (!s || typeof s.instrument !== "string" || !/^[a-z0-9_-]{1,64}$/.test(s.instrument) || ![undefined, "vae", "diffusion", "dsp"].includes(s.backend)) throw new Error("Invalid sound");
+      if (!s || typeof s.instrument !== "string" || !/^[a-z0-9_-]{1,64}$/.test(s.instrument) || ![undefined, "vae", "diffusion", "dsp", "parameters", "ddsp", "noiseband", "hybrid", "drumgan", "codec", "wavevae"].includes(s.backend)) throw new Error("Invalid sound");
       if (!s.sliders || typeof s.sliders !== "object" || Object.entries(s.sliders).some(([k, v]) => !/^[a-z0-9_]{1,64}$/.test(k) || !Number.isFinite(v) || v < 0 || v > 1)) throw new Error("Invalid controls");
       if (!s.effects || typeof s.effects !== "object" || Object.entries(s.effects).some(([k, v]) => !["attack_ms", "decay_ms", "drive", "filter"].includes(k) || !Number.isFinite(v) || v! < 0)) throw new Error("Invalid effects");
       if (s.seed !== undefined && (!Number.isInteger(s.seed) || s.seed < 0 || s.seed >= 2 ** 32)) throw new Error("Invalid seed");
@@ -103,5 +103,6 @@ export function padSummary(pad: Pad): string {
     .map(([k, v]) => `${k.slice(0, 3)} ${Math.round(v * 100)}`);
   if (pad.sound.backend === "diffusion") parts.unshift("diff");
   if (pad.sound.backend === "dsp") parts.unshift("dsp");
+  if (pad.sound.backend && !["vae", "diffusion", "dsp"].includes(pad.sound.backend)) parts.unshift(pad.sound.backend);
   return parts.join(" · ");
 }

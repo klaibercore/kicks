@@ -1,0 +1,5 @@
+# Optional upstream worker only. Resolve in its own Python environment.
+# The current SFX model also needs its model config and cached text encoder.
+stable-audio-tools @ git+https://github.com/Stability-AI/stable-audio-tools.git@3241adba4fc2a85cf5b29d9eb68d42f40a28e820
+soundfile
+scipy

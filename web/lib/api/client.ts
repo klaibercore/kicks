@@ -23,8 +23,7 @@ export function soundQuery(sound: Sound): string {
   const params = new URLSearchParams();
   params.set("instrument", sound.instrument);
   params.set("backend", sound.backend ?? "vae");
-  if (sound.backend === "diffusion") {
-    params.set("backend", "diffusion");
+  if (sound.backend === "diffusion" || sound.backend === "codec") {
     if (sound.steps) params.set("steps", String(sound.steps));
   }
   if (sound.seed) params.set("seed", String(sound.seed));

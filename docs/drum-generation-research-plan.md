@@ -11,6 +11,10 @@ Implementation followed this research on the same date. See the
 pilot measurements and the remaining listening and model gates. The proposals
 below retain their research context; they are not all implemented or validated.
 
+The subsequent request to implement the neural/hybrid candidates is documented
+in the [neural model guide](neural-models.md), including original local model
+families, isolated upstream adapters and the exact limits of their validation.
+
 ## Recommended direction
 
 **Build an instrument-specific DSP baseline, then test a hybrid of DSP and

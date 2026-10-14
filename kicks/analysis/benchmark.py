@@ -360,8 +360,8 @@ def listening_comparison(left, right, out, *, seed=42):
     report = {"instrument": a['instrument'], "method": 'matched_condition_generation_ab_v1',
               "held_out": False, "samples": [], "generation": [], "hits": [],
               "left_report_sha256": file_hash(left/'report.json'), "right_report_sha256": file_hash(right/'report.json'),
-              "comparison": {"left": {"directory": str(left.resolve()), "method": a.get('method')},
-                             "right": {"directory": str(right.resolve()), "method": b.get('method')}},
+              "comparison": {"left": {"directory": str(left.resolve()), "method": a.get('method'), "backend": a.get('backend')},
+                             "right": {"directory": str(right.resolve()), "method": b.get('method'), "backend": b.get('backend')}},
               "summary": {"samples": 0, "held_out": False, "pairs": len(pairs)}, "listening_judged": False}
     write_json(out/'report.json', report)
     return report

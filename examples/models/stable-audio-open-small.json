@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "kind": "stable-audio-open-small",
+  "instrument": "kick",
+  "checkpoint": "/absolute/path/to/stable-audio-open-small/model.safetensors",
+  "config": "/absolute/path/to/stable-audio-open-small/model_config.json",
+  "prompt": "One isolated deep kick drum, a short beater click and a decaying low body, silence afterwards. No rhythm, no music.",
+  "duration": 2,
+  "steps": 100,
+  "count": 4,
+  "seed": 42,
+  "device": "cpu"
+}

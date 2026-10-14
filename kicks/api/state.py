@@ -93,6 +93,37 @@ class ProceduralState:
         return [f"voice_{p.key}" for p in self.profile.procedural.parameters]
 
 
+@dataclass
+class ResearchState:
+    profile: InstrumentProfile
+    engine: object
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    @property
+    def names(self):
+        return [d.label for d in self.profile.descriptors]
+
+    @property
+    def model(self):
+        return self.engine.model
+
+
+def parse_research_checkpoints(spec):
+    """INSTRUMENT:KIND=PATH entries; separate from active/promoted weights."""
+    from ..nn.research import KINDS
+    served = {}
+    for item in (spec or '').split(','):
+        if not item.strip(): continue
+        identity,sep,path=item.partition('=')
+        name,colon,kind=identity.partition(':')
+        if not sep or not colon or not path.strip() or kind not in KINDS:
+            raise ValueError('expected INSTRUMENT:KIND=PATH for a research backend')
+        key=(get_profile(name.strip()).name,kind)
+        if key in served: raise ValueError('duplicate research backend')
+        served[key]=path.strip()
+    return served
+
+
 def parse_diffusion_checkpoints(spec: str | None) -> dict[str, str]:
     """``"hihat=a.pth,snare=b.pth"`` -> ``{"hihat": "a.pth", "snare": "b.pth"}``."""
     served: dict[str, str] = {}
@@ -121,6 +152,8 @@ class ServerState:
         self.diffusion_checkpoints: dict[str, str] = {}
         self._diffusion: dict[str, DiffusionState] = {}
         self.default_backend = "vae"
+        self.research_checkpoints = {}
+        self._research = {}
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -130,7 +163,7 @@ class ServerState:
         vocoder_type: str | None = None,
         control_basis: str | None = None,
         backend: str | None = None,
-    ) -> InstrumentState | DiffusionState | ProceduralState:
+    ) -> InstrumentState | DiffusionState | ProceduralState | ResearchState:
         self.device = get_device()
         self.vocoder_override = vocoder_type or os.environ.get("KICKS_VOCODER") or None
         if self.vocoder_override:
@@ -139,18 +172,24 @@ class ServerState:
         if self.control_basis not in ("pca", "descriptor"):
             raise ValueError("KICKS_CONTROL must be 'descriptor' or 'pca'")
         self.diffusion_checkpoints = parse_diffusion_checkpoints(os.environ.get("KICKS_DIFFUSION"))
+        self.research_checkpoints = parse_research_checkpoints(os.environ.get('KICKS_RESEARCH'))
+        for key,path in self.research_checkpoints.items():
+            if not os.path.isfile(path): raise FileNotFoundError(f'research checkpoint for {key} not found: {path}')
         for name, path in self.diffusion_checkpoints.items():
             if not os.path.exists(path):
                 raise FileNotFoundError(f"diffusion checkpoint for {name} not found: {path}")
         profile = get_profile(instrument)
         self.default_instrument = profile.name
         backend = backend or os.environ.get("KICKS_BACKEND", "auto")
-        if backend not in ("auto", "vae", "diffusion", "dsp"):
-            raise ValueError("KICKS_BACKEND must be auto, vae, diffusion or dsp")
+        from ..nn.research import KINDS
+        if backend not in ("auto", "vae", "diffusion", "dsp", *KINDS):
+            raise ValueError("invalid KICKS_BACKEND")
         if backend == "auto":
             backend = "vae" if os.path.exists(profile.paths.checkpoint) else (
                 "diffusion" if profile.name in self.diffusion_checkpoints else "dsp")
         self.default_backend = backend
+        if backend in KINDS:
+            return self.get_research(profile.name,backend)
         if backend == "dsp":
             return self.get_dsp(profile.name)
         if backend == "diffusion":
@@ -162,6 +201,17 @@ class ServerState:
         if profile.procedural is None:
             raise KeyError(profile.name)
         return ProceduralState(profile)
+
+    def get_research(self,name,kind):
+        from ..synthesis.research import ResearchEngine
+        profile=get_profile(name)
+        key=(profile.name,kind)
+        if key not in self.research_checkpoints: raise KeyError(key)
+        if key not in self._research:
+            engine=ResearchEngine(self.research_checkpoints[key],profile.name,device=os.environ.get('KICKS_RESEARCH_DEVICE','cpu'))
+            if engine.kind!=kind: raise ValueError('configured research backend differs from checkpoint kind')
+            self._research[key]=ResearchState(profile,engine)
+        return self._research[key]
 
     @property
     def loaded(self) -> list[str]:

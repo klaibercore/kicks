@@ -111,7 +111,8 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   const [rendering, setRendering] = useState(false);
   const [renderMs, setRenderMs] = useState<number | null>(null);
   // Diffusion renders take seconds, so auditioning every slider release is opt-in there.
-  const [autoAuditionBy, setAutoAuditionBy] = useState<Record<Backend, boolean>>({ vae: true, diffusion: false, dsp: true });
+  const [autoAuditionBy, setAutoAuditionBy] = useState<Record<Backend, boolean>>({ vae: true, diffusion: false, dsp: true,
+    parameters: false, ddsp: false, noiseband: false, hybrid: false, drumgan: false, codec: false, wavevae: false });
   const [evaluation, setEvaluation] = useState<Evaluation | null>(null);
   const [evaluating, setEvaluating] = useState(false);
   const [spectrogram, setSpectrogram] = useState<Spectrogram | null>(null);
@@ -245,7 +246,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
 
   const setSteps = useCallback(
     (steps: number) => {
-      if (backend === "diffusion") update((s) => ({ ...s, steps }));
+      if (backend === "diffusion" || backend === "codec") update((s) => ({ ...s, steps }));
     },
     [backend, update],
   );

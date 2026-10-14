@@ -482,6 +482,8 @@ const SVGNS='http://www.w3.org/2000/svg';
 function svgEl(tag,attrs={},text){const n=document.createElementNS(SVGNS,tag);for(const[k,v]of Object.entries(attrs))n.setAttribute(k,v);if(text!==undefined)n.textContent=text;return n}
 function banner(id,message){$(id).textContent=message||'';$(id).classList.toggle('hidden',!message)}
 const isDiffusion=run=>run?.config?.backend==='waveform_diffusion';
+const isResearch=run=>run?.config?.model_kind==='drum_research_v1';
+const researchNames={parameters:'Neural parameter synth',ddsp:'DDSP',noiseband:'Noise-band VAE',hybrid:'Learned hybrid',drumgan:'Conditional waveform GAN',codec:'DAC latent prior',wavevae:'Waveform VAE'};
 const notesFields=['objective','hypothesis','success_criteria','observations','decision'];
 let runs=[],current=null,selected=params.get('run'),fetching=false,drafts=new Map();
 let tab=params.get('tab')||'overview';
@@ -532,7 +534,13 @@ const VAE_METRICS=[
  {key:'train_term_hf_detail',title:'Train, HF detail term',scale:'log',more:true},
  {key:'train_term_attack_change',title:'Train, attack change term',scale:'log',more:true},
 ];
-const metricsFor=run=>isDiffusion(run)?DIFFUSION_METRICS:VAE_METRICS;
+const RESEARCH_METRICS=[
+ {key:'val_loss',title:'Validation objective',scale:'log',better:'down',note:'Fixed stochastic inputs on the declared validation source groups. Objectives differ by model family.'},
+ {key:'train_loss',title:'Training objective',scale:'lin',note:'Training loss for this model family; a GAN generator objective may be negative. It is not a listening score.'},
+ {key:'learning_rate',title:'Learning rate',scale:'zero',exp:true},
+ {key:'epoch_seconds',title:'Epoch time',unit:'s',scale:'zero'},
+];
+const metricsFor=run=>isResearch(run)?RESEARCH_METRICS:isDiffusion(run)?DIFFUSION_METRICS:VAE_METRICS;
 
 /* ============ horizontal axis ============ */
 function stepsPerEpoch(c){
@@ -810,10 +818,10 @@ function renderCompareControls(){
 function render(){
  if(!current)return;
  $('empty').classList.add('hidden');$('workspace').classList.remove('hidden');
- const c=current.config,wave=isDiffusion(current),h=current.history||[],last=h.at(-1)||{},st=runState(current);
+ const c=current.config,wave=isDiffusion(current),research=isResearch(current),h=current.history||[],last=h.at(-1)||{},st=runState(current);
  $('runName').textContent=current.name;
  const arch=c.architecture||{},gpu=c.runtime?.accelerator?.name,exe=c.execution;
- const meta=[instName(c.instrument),wave?'Waveform diffusion':'VAE',`${Number(c.corpus_samples).toLocaleString('en-US')} hits`,
+ const meta=[instName(c.instrument),research?(researchNames[c.backend]||c.backend):wave?'Waveform diffusion':'VAE',`${Number(c.corpus_samples).toLocaleString('en-US')} hits`,
   wave&&c.effective_batch?`batch ${c.effective_batch}`:null,
   !wave&&c.latent_dim?`${c.latent_dim} latent dimensions`:null,
   `${sig(Number(c.parameters)/1e6,3)} M parameters`,
@@ -854,18 +862,18 @@ function render(){
  if(first&&finite(last[detailKey]))insights.push(wave?`Low-noise validation loss went from ${sig(first[detailKey],3)} to ${sig(last[detailKey],3)}.`:`8–16 kHz detail error went from ${sig(first[detailKey],3)} dB to ${sig(last[detailKey],3)} dB.`);
  if(!wave&&finite(last.active_dims))insights.push(`${last.active_dims} of ${c.latent_dim} latent dimensions carry more than 0.01 nats of raw KL.`);
  const proxy=h.findLast(r=>finite(wave?r.control_mae:r.eval_proxy));
- insights.push(wave?(proxy?`Latest descriptor target error is ${sig(proxy.control_mae,3)} sd at epoch ${proxy.epoch}. It measures whether the sliders land, not whether the hit sounds right.`:'The descriptor target error has not been measured; it needs --eval-every.'):(proxy?`Latest generative proxy is ${sig(proxy.eval_proxy,3)} at epoch ${proxy.epoch}. It measures descriptor distributions, not listening quality.`:'The generative proxy has not been measured yet.'));
+ insights.push(research?'Inspect the final-waveform generation audit, target errors and blind listening separately from these training objectives.':wave?(proxy?`Latest descriptor target error is ${sig(proxy.control_mae,3)} sd at epoch ${proxy.epoch}. It measures whether the sliders land, not whether the hit sounds right.`:'The descriptor target error has not been measured; it needs --eval-every.'):(proxy?`Latest generative proxy is ${sig(proxy.eval_proxy,3)} at epoch ${proxy.epoch}. It measures descriptor distributions, not listening quality.`:'The generative proxy has not been measured yet.'));
  if(!(current.notes?.observations||'').trim())insights.push('No observations yet. Write down what you measured and heard before deciding anything.');
- if(!wave&&current.status==='completed'&&!(current.reports||[]).some(r=>r.kind==='fidelity'))insights.push(`No fidelity report is attached. Run kicks fidelity --run ${current.id} to measure rendered audio against matched references.`);
+ if(!wave&&!research&&current.status==='completed'&&!(current.reports||[]).some(r=>r.kind==='fidelity'))insights.push(`No fidelity report is attached. Run kicks fidelity --run ${current.id} to measure rendered audio against matched references.`);
  $('insights').replaceChildren(...insights.map(t=>el('li',t)));
- $('scope').textContent=wave?'These numbers measure a denoising objective and a descriptor proxy, not audio quality. Generate samples, measure them and listen before drawing a conclusion.':'Detail errors measure the decoded mel spectrogram before the vocoder. A lower error or a healthy latent space does not establish final audio quality: complete the waveform, listening and slider-control checks before promotion.';
- const fields=wave?{instrument:'Instrument',backend:'Backend',device:'Device',optimizer:'Optimizer',learning_rate:'Initial learning rate',epochs:'Epochs',batch_size:'Micro-batch',grad_accum:'Gradient accumulation',effective_batch:'Effective batch',cond_dropout:'Conditioning dropout',ema_decay:'EMA decay',length:'Samples per hit',descriptors:'Conditioning descriptors',architecture:'Architecture',parameters:'Parameters',seed:'Seed',train_samples:'Training hits',val_samples:'Validation hits',eval_every:'Control proxy interval',eval_steps:'Control proxy steps',source_checkpoint:'Source checkpoint',checkpoint:'Best checkpoint',split_fingerprint:'Data and split fingerprint',objective:'Objective',validation_objective:'Validation objective',preprocessing:'Preprocessing'}:{instrument:'Instrument',device:'Device',optimizer:'Optimizer',learning_rate:'Initial learning rate',epochs:'Epochs',beta:'Validation β',beta_floor:'β floor',free_bits:'Free bits',beta_cycles:'β cycles',batch_size:'Batch size',seed:'Seed',train_samples:'Training hits',val_samples:'Validation hits',latent_dim:'Latent dimensions',architecture:'Architecture',parameters:'Parameters',transient_weight:'Transient weight',hf_detail_weight:'HF detail weight',attack_change_weight:'Attack change weight',source_checkpoint:'Source checkpoint',checkpoint:'Best checkpoint',split_fingerprint:'Data and split fingerprint',validation_objective:'Validation objective',detail_metric:'Detail metric'};
+ $('scope').textContent=research?'These are experimental family-specific objectives. Parameter-bank fitting has no held-out validation; codec validation is in latent space. Neither establishes generation quality. Inspect the exact checkpoint, final audio and listening evidence.':wave?'These numbers measure a denoising objective and a descriptor proxy, not audio quality. Generate samples, measure them and listen before drawing a conclusion.':'Detail errors measure the decoded mel spectrogram before the vocoder. A lower error or a healthy latent space does not establish final audio quality: complete the waveform, listening and slider-control checks before promotion.';
+ const fields=research?{instrument:'Instrument',backend:'Backend',device:'Device',optimizer:'Optimizer',learning_rate:'Learning rate',epochs:'Epoch limit',max_steps:'Step limit',batch_size:'Batch size',seed:'Seed',train_samples:'Training hits',val_samples:'Validation hits',architecture:'Architecture',parameters:'Parameters',checkpoint:'Candidate checkpoint',manifest_sha256:'Frozen manifest',split_fingerprint:'Selected source split',objective:'Training objective',validation_objective:'Validation objective',codec:'Matched codec',preprocessing:'Preprocessing'}:wave?{instrument:'Instrument',backend:'Backend',device:'Device',optimizer:'Optimizer',learning_rate:'Initial learning rate',epochs:'Epochs',batch_size:'Micro-batch',grad_accum:'Gradient accumulation',effective_batch:'Effective batch',cond_dropout:'Conditioning dropout',ema_decay:'EMA decay',length:'Samples per hit',descriptors:'Conditioning descriptors',architecture:'Architecture',parameters:'Parameters',seed:'Seed',train_samples:'Training hits',val_samples:'Validation hits',eval_every:'Control proxy interval',eval_steps:'Control proxy steps',source_checkpoint:'Source checkpoint',checkpoint:'Best checkpoint',split_fingerprint:'Data and split fingerprint',objective:'Objective',validation_objective:'Validation objective',preprocessing:'Preprocessing'}:{instrument:'Instrument',device:'Device',optimizer:'Optimizer',learning_rate:'Initial learning rate',epochs:'Epochs',beta:'Validation β',beta_floor:'β floor',free_bits:'Free bits',beta_cycles:'β cycles',batch_size:'Batch size',seed:'Seed',train_samples:'Training hits',val_samples:'Validation hits',latent_dim:'Latent dimensions',architecture:'Architecture',parameters:'Parameters',transient_weight:'Transient weight',hf_detail_weight:'HF detail weight',attack_change_weight:'Attack change weight',source_checkpoint:'Source checkpoint',checkpoint:'Best checkpoint',split_fingerprint:'Data and split fingerprint',validation_objective:'Validation objective',detail_metric:'Detail metric'};
  const describe=(k,v)=>v===null||v===undefined?'—':k==='architecture'?Object.entries(v).map(([a,b])=>`${a} ${Array.isArray(b)?b.join('/'):b}`).join(', ')||'default':Array.isArray(v)?v.join(', '):typeof v==='object'?JSON.stringify(v):typeof v==='number'?v.toLocaleString('en-US',{maximumFractionDigits:6}):String(v);
  $('config').replaceChildren(...Object.entries(fields).flatMap(([k,label])=>[el('dt',label),el('dd',describe(k,c[k]))]));
  $('runId').textContent=current.id;
  renderEvidence();
  /* table view: the accessible counterpart of the charts */
- const cols=wave?[['epoch','Epoch'],['val_loss','Validation',4],['val_loss_low_sigma','Low noise',4],['val_loss_mid_sigma','Mid noise',4],['val_loss_high_sigma','High noise',4],['control_mae','Target error',3],['learning_rate','Learning rate','e'],['epoch_seconds','Seconds',3]]:[['epoch','Epoch'],['val_loss','Validation',4],['hf_mae_db','2–16 kHz dB',3],['air_mae_db','8–16 kHz dB',3],['attack_mae_db','Attack dB',3],['active_dims','Active'],['beta','β',3],['learning_rate','Learning rate','e'],['epoch_seconds','Seconds',3]];
+ const cols=research?[['epoch','Epoch'],['steps','Steps'],['train_loss','Training objective',4],['val_loss','Validation objective',4],['epoch_seconds','Seconds',3]]:wave?[['epoch','Epoch'],['val_loss','Validation',4],['val_loss_low_sigma','Low noise',4],['val_loss_mid_sigma','Mid noise',4],['val_loss_high_sigma','High noise',4],['control_mae','Target error',3],['learning_rate','Learning rate','e'],['epoch_seconds','Seconds',3]]:[['epoch','Epoch'],['val_loss','Validation',4],['hf_mae_db','2–16 kHz dB',3],['air_mae_db','8–16 kHz dB',3],['attack_mae_db','Attack dB',3],['active_dims','Active'],['beta','β',3],['learning_rate','Learning rate','e'],['epoch_seconds','Seconds',3]];
  $('epochHead').replaceChildren(...cols.map(([,label])=>el('th',label)));
  $('tableNote').textContent=h.length>8?`Last 8 of ${h.length} rows. Export JSON for all of them.`:'';
  $('epochRows').replaceChildren(...h.slice(-8).reverse().map(r=>{const tr=el('tr');for(const[k,,d]of cols){const v=r[k];tr.append(el('td',k==='epoch'?(v===0?'0, baseline':String(v)):!finite(v)?'—':d==='e'?v.toExponential(2):d?sig(v,d):String(v),'num'))}return tr}));

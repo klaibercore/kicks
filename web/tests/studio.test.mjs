@@ -61,6 +61,10 @@ test('render queries preserve engine identity for old VAE and new DSP presets', 
   assert.equal(new URLSearchParams(soundQuery(base)).get('backend'), 'vae');
   assert.equal(new URLSearchParams(soundQuery({ ...base, backend: 'dsp' })).get('backend'), 'dsp');
   assert.equal(new URLSearchParams(soundQuery({ ...base, backend: 'diffusion', steps: 25 })).get('steps'), '25');
+  assert.equal(new URLSearchParams(soundQuery({ ...base, backend: 'codec', steps: 10 })).get('steps'), '10');
+  for (const backend of ['parameters','ddsp','noiseband','hybrid','drumgan','wavevae']) {
+    assert.equal(new URLSearchParams(soundQuery({ ...base, backend })).get('backend'), backend);
+  }
 });
 
 test('kit import rejects bad seeds, control values and unsupported engines', () => {
@@ -68,6 +72,10 @@ test('kit import rejects bad seeds, control values and unsupported engines', () 
   const kit = emptyKit('Test');
   kit.pads[0].sound = { instrument: 'kick', backend: 'dsp', sliders: { voice_tune_hz: .5 }, effects: {}, seed: 3 };
   assert.equal(parseKit(kit).pads[0].sound.backend, 'dsp');
+  for (const backend of ['parameters','ddsp','noiseband','hybrid','drumgan','codec','wavevae']) {
+    kit.pads[0].sound.backend = backend;
+    assert.equal(parseKit(kit).pads[0].sound.backend, backend);
+  }
   kit.pads[0].sound.seed = -1;
   assert.throws(() => parseKit(kit));
   kit.pads[0].sound.seed = 1;

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "kind": "musicgen",
+  "instrument": "kick",
+  "checkpoint": "/absolute/path/to/local-musicgen-model-directory",
+  "prompt": "One isolated acoustic bass drum hit, silence afterwards, no accompaniment.",
+  "duration": 2,
+  "count": 4,
+  "seed": 42,
+  "device": "cpu"
+}

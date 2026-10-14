@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "kind": "audiogen",
+  "instrument": "hihat",
+  "checkpoint": "/absolute/path/to/local-audiogen-model-directory",
+  "prompt": "A single isolated closed hi-hat hit, crisp metallic attack, short decay, silence afterwards.",
+  "duration": 2,
+  "count": 4,
+  "seed": 42,
+  "device": "cpu"
+}

@@ -1,7 +1,7 @@
 export type InstrumentName = string;
 
 /** How a sound is synthesised: the VAE and a vocoder, or the waveform diffusion model. */
-export type Backend = "vae" | "diffusion" | "dsp";
+export type Backend = "vae" | "diffusion" | "dsp" | "parameters" | "ddsp" | "noiseband" | "hybrid" | "drumgan" | "codec" | "wavevae";
 
 export interface InstrumentInfo {
   name: InstrumentName;
@@ -54,6 +54,7 @@ export interface InstrumentConfig {
   presets?: { name: string; sliders: Record<string, number> }[];
   choke_group?: string | null;
   renderer_version?: string;
+  device?: string;
   /** Diffusion only: which checkpoint is served. */
   checkpoint?: { name: string; epoch: number | null; run_id: string | null };
 }

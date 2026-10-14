@@ -45,7 +45,8 @@ from ..synthesis.controlled import control_latent, render_controls
 from ..synthesis.diffusion import render_hit, slider_range
 from ..synthesis.identity import IdentityBasis
 from .middleware import LRUCache, RateLimiter
-from .state import DiffusionState, InstrumentState, ProceduralState, ServerState
+from .state import DiffusionState, InstrumentState, ProceduralState, ResearchState, ServerState
+from ..nn.research import KINDS as RESEARCH_BACKENDS
 from ..synthesis.procedural import RENDERER_VERSION, render as render_dsp
 
 state = ServerState()
@@ -53,7 +54,7 @@ rate_limiter = RateLimiter(rate=10.0)
 audio_cache = LRUCache(max_size=100)
 render_cache: LRUCache[tuple[torch.Tensor, torch.Tensor]] = LRUCache(max_size=32)
 
-BACKENDS = ("vae", "diffusion", "dsp")
+BACKENDS = ("vae", "diffusion", "dsp", *RESEARCH_BACKENDS)
 DIFFUSION_STEPS = (10, 200)
 DEFAULT_DIFFUSION_STEPS = 50
 EFFECTS = ("attack_ms", "decay_ms", "drive", "filter")
@@ -175,7 +176,7 @@ def _slider_positions(request: Request, inst: InstrumentState | DiffusionState |
     descriptor PC1 turned out to correlate with, which is not knowable in
     advance. Diffusion sliders are the checkpoint's descriptors, in order.
     """
-    names = inst.names if isinstance(inst, (DiffusionState, ProceduralState)) else inst.basis.names
+    names = inst.names if isinstance(inst, (DiffusionState, ProceduralState, ResearchState)) else inst.basis.names
     positions = []
     for i, label in enumerate(names):
         raw = None
@@ -334,8 +335,64 @@ async def _evaluate_dsp(request: Request) -> dict:
     return body
 
 
-async def _render(request: Request) -> tuple[InstrumentState | DiffusionState | ProceduralState, torch.Tensor]:
+def _resolve_research(request):
+    name=request.query_params.get('instrument') or state.default_instrument
+    try:
+        return state.get_research(name,_backend(request))
+    except KeyError:
+        raise HTTPException(status_code=503,detail='No candidate checkpoint is configured for this instrument/backend') from None
+    except (ValueError,OSError,RuntimeError) as exc:
+        raise HTTPException(status_code=503,detail=f'Candidate checkpoint is unavailable: {exc}') from exc
+
+
+async def _synthesize_research(request,inst):
+    positions=_slider_positions(request,inst);seed=_texture_seed(request)
+    steps=_steps(request) if inst.engine.kind=='codec' else 25
+    key=repr(('research',inst.engine.sha256,positions,seed,steps))
+    cached=render_cache.get(key)
+    if cached is None:
+        async with inst.lock:
+            cached=render_cache.get(key)
+            if cached is None:
+                audio,targets=await run_in_threadpool(inst.engine.render,positions,seed=seed,steps=steps)
+                cached=(torch.from_numpy(audio)[None],torch.from_numpy(targets));render_cache.put(key,cached)
+    return _apply_shaping(cached[0],_shaping(request)),cached[1]
+
+
+def _research_config(inst):
+    low,high=slider_range(inst.model)
+    return {'instrument':inst.profile.name,'display_name':inst.profile.display_name,
+            'backend':inst.engine.kind,'vocoder':'none','control':'descriptor','variation':True,
+            'description':'Experimental learned candidate. Descriptor targets are approximate; audition before use.',
+            'calibration':None,'device':str(inst.engine.device),
+            'choke_group':inst.profile.procedural.choke_group,
+            'checkpoint':{'name':inst.engine.path.name,'epoch':inst.engine.metadata.get('epoch'),
+                          'sha256':inst.engine.sha256,'run_id':inst.engine.metadata['training'].get('run_id')},
+            'steps':{'default':25,'min':10,'max':200} if inst.engine.kind=='codec' else None,
+            'sliders':[{'id':i+1,'key':slider_key(d.label),'name':d.label,'min':0,'max':1,'default':.5,
+                        'step':.01,'description':d.doc,'target_min':float(low[i]),'target_max':float(high[i])}
+                       for i,d in enumerate(inst.profile.descriptors)]}
+
+
+async def _evaluate_research(request):
+    inst=_resolve_research(request);waveform,targets=await _synthesize_research(request,inst)
+    measured=label_waveform(peak_normalize(waveform),inst.profile)
+    low,high=slider_range(inst.model)
+    error=float(np.max(np.abs(measured-targets.numpy())/np.maximum(high-low,1e-6)))
+    return {'instrument':inst.profile.name,'backend':inst.engine.kind,
+            'descriptors':dict(zip(inst.profile.descriptor_keys,map(float,measured))),
+            'metrics':analyze_hit(waveform[0].numpy(),inst.profile),'verdicts':[],
+            'corpus_available':False,'experimental':True,
+            'control_fit':{'max_normalized_error':error,
+                           'targets':dict(zip(inst.profile.descriptor_keys,targets.tolist())),
+                           'limited':error>.05,'seed':_texture_seed(request),'includes_effects':any(k in request.query_params for k in EFFECTS)}}
+
+
+async def _render(request: Request) -> tuple[InstrumentState | DiffusionState | ProceduralState | ResearchState, torch.Tensor]:
     """The instrument state and shaped waveform for either backend."""
+    if _backend(request) in RESEARCH_BACKENDS:
+        inst=_resolve_research(request)
+        return inst,(await _synthesize_research(request,inst))[0]
     if _backend(request) == "dsp":
         inst = _resolve_dsp(request)
         return inst, await _synthesize_dsp(request, inst)
@@ -369,6 +426,7 @@ async def health() -> dict:
         "cached_responses": len(audio_cache),
         "default_backend": state.default_backend,
         "dsp": [n for n in available() if get_profile(n).procedural is not None],
+        "research": [{'instrument':n,'backend':k} for n,k in state.research_checkpoints],
     }
 
 
@@ -391,6 +449,7 @@ async def instruments() -> dict:
                     ("vae", os.path.exists(profile.paths.checkpoint)),
                     ("diffusion", profile.name in state.diffusion_checkpoints),
                     ("dsp", profile.procedural is not None),
+                    *((k,(profile.name,k) in state.research_checkpoints) for k in RESEARCH_BACKENDS),
                 ) if served
             ], key=lambda b: b != state.default_backend),
         })
@@ -400,6 +459,8 @@ async def instruments() -> dict:
 @app.get("/config")
 async def config(request: Request) -> dict:
     """Slider definitions for one instrument and backend."""
+    if _backend(request) in RESEARCH_BACKENDS:
+        return _research_config(_resolve_research(request))
     if _backend(request) == "dsp":
         return _dsp_config(_resolve_dsp(request))
     if _backend(request) == "diffusion":
@@ -506,6 +567,8 @@ async def evaluate(
     Same query parameters as /generate. Returns the corpus-referenced perceptual
     verdicts plus the spectrogram descriptors.
     """
+    if _backend(request) in RESEARCH_BACKENDS:
+        return await _evaluate_research(request)
     if _backend(request) == "dsp":
         return await _evaluate_dsp(request)
     if _backend(request) == "diffusion":
@@ -607,6 +670,11 @@ async def spectrogram(
     A diffusion render has no spectrogram of its own; for it this is the
     normalised mel spectrogram of the rendered waveform, effects included.
     """
+    if _backend(request) in RESEARCH_BACKENDS:
+        inst=_resolve_research(request);waveform,_=await _synthesize_research(request,inst)
+        spec=waveform_spectrogram(waveform,n_frames=N_FRAMES).squeeze(0)
+        return {'instrument':inst.profile.name,'backend':inst.engine.kind,'source':'render',
+                'shape':list(spec.shape),'data':spec.numpy().tolist()}
     if _backend(request) == "dsp":
         inst = _resolve_dsp(request)
         waveform = await _synthesize_dsp(request, inst)
@@ -652,12 +720,13 @@ def _export_filename(
     """
     diffusion = isinstance(inst, DiffusionState)
     procedural = isinstance(inst, ProceduralState)
-    names = inst.names if diffusion or procedural else inst.basis.names
+    research = isinstance(inst, ResearchState)
+    names = inst.names if diffusion or procedural or research else inst.basis.names
     parts = [
         f"{_SAFE_NAME.sub('', name.lower())}{round(p * 100):02d}"
         for name, p in zip(names, positions)
     ]
-    tag = "_diffusion" if diffusion else "_dsp" if procedural else ""
+    tag = f'_{inst.engine.kind}' if research else "_diffusion" if diffusion else "_dsp" if procedural else ""
     suffix = f"_v{seed}" if seed else ""
     return f"{inst.profile.name}{tag}_{'_'.join(parts)}{suffix}.wav"
 

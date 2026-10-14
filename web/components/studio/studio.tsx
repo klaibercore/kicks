@@ -69,6 +69,7 @@ function StudioBody() {
   }
 
   const diffusion = studio.backend === "diffusion";
+  const candidate = !['vae', 'diffusion', 'dsp'].includes(studio.backend);
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6">
@@ -83,6 +84,8 @@ function StudioBody() {
           <div className="flex flex-wrap gap-1.5 font-mono text-[11px]">
             {studio.backend === "dsp" ? (
               <Badge variant="outline">DSP synthesis</Badge>
+            ) : candidate ? (
+              <Badge variant="outline">{studio.backend} · experimental</Badge>
             ) : diffusion ? (
               <>
                 <Badge variant="outline">diffusion</Badge>
@@ -94,7 +97,7 @@ function StudioBody() {
                 <Badge variant="outline">{studio.config?.variation ? "Corpus texture" : `${studio.health.control} basis`}</Badge>
               </>
             )}
-            <Badge variant="outline">{studio.backend === "dsp" ? "cpu" : studio.health.device}</Badge>
+            <Badge variant="outline">{studio.backend === "dsp" ? "cpu" : studio.config?.device ?? studio.health.device}</Badge>
           </div>
         ) : null}
       </div>
@@ -145,6 +148,7 @@ function StudioBody() {
               <CardDescription>
                 {studio.backend === "dsp"
                   ? "The synthesized waveform for the current controls."
+                  : candidate ? "What the learned candidate produced for the current settings."
                   : diffusion
                   ? "What the diffusion model produced for the current settings. No vocoder is involved."
                   : "What the vocoder produced for the current settings."}

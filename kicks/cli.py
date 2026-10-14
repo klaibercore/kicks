@@ -422,6 +422,8 @@ def serve(
         help="Also serve a waveform diffusion checkpoint, as INSTRUMENT=PATH (repeatable); "
              "requests select it with backend=diffusion",
     ),
+    neural: list[str] = typer.Option(None,"--neural",help="Serve a candidate as INSTRUMENT:KIND=PATH (repeatable); inspect kinds with neural-models"),
+    neural_root: str = typer.Option(None,"--neural-root",help="Serve best.pth from INSTRUMENT-KIND subdirectories of a local candidate root"),
     reload: bool = typer.Option(False, "--reload", help="Auto-reload on code changes (development)"),
 ) -> None:
     """Start the REST API (the website in web/ is its client)."""
@@ -432,8 +434,9 @@ def serve(
     from kicks.instruments import get_profile
 
     profile = get_profile(instrument)
-    if backend not in ("auto", "dsp", "vae", "diffusion"):
-        raise typer.BadParameter("backend must be auto, dsp, vae or diffusion")
+    from kicks.nn.research import KINDS
+    if backend not in ("auto", "dsp", "vae", "diffusion", *KINDS):
+        raise typer.BadParameter("unknown backend; inspect neural-models")
     os.environ["KICKS_BACKEND"] = backend
     os.environ["KICKS_INSTRUMENT"] = profile.name
     control = control or os.environ.get("KICKS_CONTROL", "descriptor")
@@ -462,6 +465,25 @@ def serve(
         os.environ["KICKS_DIFFUSION"] = spec
         for name, path in served.items():
             print(f"Diffusion backend for {name}: {path} (experimental; not a promoted model)")
+
+    if neural_root:
+        from pathlib import Path
+        from kicks.instruments import available
+        root=Path(neural_root)
+        discovered=[f'{name}:{kind}={root/f"{name}-{kind}"/"best.pth"}'
+                    for name in available() for kind in KINDS if (root/f'{name}-{kind}'/'best.pth').is_file()]
+        if not discovered: raise typer.BadParameter('no candidate checkpoints found',param_hint='--neural-root')
+        neural=[*(neural or []),*discovered]
+    if neural:
+        from kicks.api.state import parse_research_checkpoints
+        spec=','.join(neural)
+        try:
+            served=parse_research_checkpoints(spec)
+            for path in served.values():
+                if not os.path.isfile(path): raise ValueError(f'not found: {path}')
+        except (ValueError,KeyError) as exc:
+            raise typer.BadParameter(str(exc),param_hint='--neural') from exc
+        os.environ['KICKS_RESEARCH']=spec
 
     print(f"Serving {profile.display_name} on http://{host}:{port}")
     uvicorn.run("kicks.api:app", host=host, port=port, reload=reload)
@@ -801,3 +823,86 @@ def codec_audit(
     from kicks.analysis.codec_audit import audit_codec
     result = audit_codec(checkpoint, manifest, instrument or 'hihat', out=out, split=split, count=count)
     print(f"Audited {len(result['samples'])} {split} hits -> {out}")
+
+
+@app.command('neural-models')
+def neural_models():
+    """List implemented local models and optional isolated upstream adapters."""
+    import json
+    from kicks.nn.research import KINDS
+    print(json.dumps({'trainable':list(KINDS),'existing':['vae','diffusion'],
+        'external':['stable-audio-3','stable-audio-open-small','rave','audiogen','musicgen'],
+        'experimental':True,'weights_are_not_quality_approval':True},indent=2))
+
+
+@app.command('neural-train')
+def neural_train(
+    kind:str=typer.Option(...,'--kind'),
+    manifest:str=typer.Option(...,'--manifest'),
+    instrument:str=INSTRUMENT,
+    out:str=typer.Option(...,'--out'),
+    bank:str=typer.Option(None,'--bank'),
+    codec_checkpoint:str=typer.Option(None,'--codec-checkpoint'),
+    epochs:int=typer.Option(2,'--epochs',min=1),
+    max_steps:int=typer.Option(32,'--max-steps',min=1),
+    limit:int=typer.Option(32,'--limit',min=1),
+    validation_limit:int=typer.Option(8,'--validation-limit',min=1),
+    batch_size:int=typer.Option(2,'--batch-size',min=1),
+    learning_rate:float=typer.Option(.001,'--learning-rate',min=.0000001,max=.1),
+    seed:int=typer.Option(42,'--seed',min=0,max=4294967295),
+    device:str=typer.Option('cpu','--device'),
+    intent:str=typer.Option(...,'--intent'),
+    hypothesis:str=typer.Option(...,'--hypothesis'),
+    success_criteria:str=typer.Option(...,'--success-criteria'),
+    run_name:str=typer.Option(None,'--run-name'),
+):
+    """Train an isolated parameter, DDSP/noise/hybrid, GAN, wave VAE or DAC prior."""
+    import json
+    from kicks.training.research import train_research
+    result=train_research(kind,manifest,instrument or 'kick',out=out,bank=bank,codec_checkpoint=codec_checkpoint,
+        epochs=epochs,max_steps=max_steps,limit=limit,validation_limit=validation_limit,batch_size=batch_size,
+        learning_rate=learning_rate,seed=seed,device=device,intent=intent,hypothesis=hypothesis,
+        success_criteria=success_criteria,run_name=run_name)
+    print(json.dumps(result,indent=2))
+
+
+@app.command('neural-generate')
+def neural_generate(
+    checkpoint:str=typer.Option(...,'--checkpoint'),
+    out:str=typer.Option(...,'--out'),
+    instrument:str=INSTRUMENT,
+    count:int=typer.Option(8,'--count','-n',min=1),
+    seed:int=typer.Option(0,'--seed',min=0,max=4294967295),
+    steps:int=typer.Option(25,'--steps',min=1,max=200),
+    target:list[str]=typer.Option(None,'--target',help='Raw descriptor KEY=VALUE; repeatable'),
+    codec_checkpoint:str=typer.Option(None,'--codec-checkpoint'),
+    conditions:str=typer.Option(None,'--conditions',help='JSON array of complete raw descriptor rows for matched comparisons'),
+):
+    """Generate candidate WAVs, exact identities and a common final-audio audit."""
+    import json
+    from pathlib import Path
+    from kicks.synthesis.research import generate_research
+    targets={}
+    for item in target or []:
+        key,sep,value=item.partition('=')
+        try:
+            if not sep: raise ValueError('expected KEY=VALUE')
+            targets[key]=float(value)
+        except ValueError as exc: raise typer.BadParameter(str(exc)) from exc
+    result=generate_research(checkpoint,out=out,instrument=instrument,count=count,seed=seed,steps=steps,
+                             targets=targets,codec_checkpoint=codec_checkpoint,
+                             conditions=json.loads(Path(conditions).read_text()) if conditions else None)
+    print(json.dumps(result['summary'],indent=2))
+
+
+@app.command('external-generate')
+def external_generate(
+    spec:str=typer.Option(...,'--spec',help='Versioned local model/prompt job JSON'),
+    out:str=typer.Option(...,'--out'),
+    python:str=typer.Option(None,'--python',help='Python executable in an isolated upstream model environment'),
+):
+    """Run local Stable Audio, RAVE or AudioCraft assets in an isolated worker."""
+    import json
+    import sys
+    from kicks.synthesis.external import external_generate as run
+    print(json.dumps(run(spec,out=out,python=python or sys.executable)['summary'],indent=2))

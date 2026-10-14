@@ -132,6 +132,11 @@ weights or fall back to training data.
 
 ## Existing neural engines
 
+The [neural and hybrid model guide](docs/neural-models.md) covers the seven new
+trainable research families, their Studio integration, and optional isolated
+Stable Audio, RAVE and AudioCraft adapters. Candidate weights remain separate
+from the existing instrument checkpoints.
+
 The VAE learns a global latent representation of 128-band log-mels. Its
 per-instrument defaults use DisCoder for kicks/snares and BigVGAN for hats.
 Calibrated perceptual controls and waveform corrections remain available.

@@ -4,7 +4,9 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useStudio } from "@/hooks/use-studio";
 import type { Backend } from "@/lib/api/types";
 
-const LABELS: Record<Backend, string> = { vae: "VAE", diffusion: "Diffusion", dsp: "Synth" };
+const LABELS: Record<Backend, string> = { vae: "VAE", diffusion: "Diffusion", dsp: "Synth",
+  parameters: "Neural synth", ddsp: "DDSP", noiseband: "Noise bands", hybrid: "Learned hybrid",
+  drumgan: "Conditional GAN", codec: "Codec prior", wavevae: "Waveform VAE" };
 
 /** Sampler-step presets offered in the studio; the API accepts any integer in its range. */
 const STEP_PRESETS = [25, 50, 100, 200];
@@ -26,7 +28,12 @@ export function EnginePicker() {
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <span className="text-xs font-medium text-muted-foreground">Engine</span>
-        <Tabs value={backend} onValueChange={(v) => v && setBackend(v as Backend)}>
+        {backends.length > 4 ? (
+          <select aria-label="Synthesis engine" value={backend} onChange={(e) => setBackend(e.target.value as Backend)}
+            className="max-w-full rounded-md border border-border bg-background px-3 py-1.5 text-xs">
+            {backends.map((b) => <option key={b} value={b}>{LABELS[b]}</option>)}
+          </select>
+        ) : <Tabs value={backend} onValueChange={(v) => v && setBackend(v as Backend)}>
           <TabsList className="h-8">
             {backends.map((b) => (
               <TabsTrigger key={b} value={b} className="px-3 text-xs">
@@ -34,7 +41,7 @@ export function EnginePicker() {
               </TabsTrigger>
             ))}
           </TabsList>
-        </Tabs>
+        </Tabs>}
       </div>
 
       {backend === "dsp" && config?.presets ? (
@@ -46,7 +53,7 @@ export function EnginePicker() {
         </div>
       ) : null}
 
-      {backend === "diffusion" && config?.backend === "diffusion" ? (
+      {config?.steps ? (
         <>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <span className="text-xs font-medium text-muted-foreground">Sampler steps</span>
@@ -68,7 +75,7 @@ export function EnginePicker() {
             </Tabs>
           </div>
           <p className="text-xs leading-relaxed text-muted-foreground">
-            Experimental. The diffusion model writes the waveform directly, with no vocoder, and follows the sliders
+            Experimental. The {backend === "codec" ? "codec prior" : "diffusion model"} writes audio from noise and follows the sliders
             approximately. Each slider spans the corpus from its 1st to its 99th percentile, centred on the median hit.
             More steps take proportionally longer.
             {renderMs !== null ? (
@@ -86,6 +93,9 @@ export function EnginePicker() {
             ) : null}
           </p>
         </>
+      ) : null}
+      {!['vae','diffusion','dsp','codec'].includes(backend) ? (
+        <p className="text-xs leading-relaxed text-muted-foreground">Experimental learned candidate. Sliders request measured descriptor values; target accuracy and sound quality depend on its training.</p>
       ) : null}
     </div>
   );

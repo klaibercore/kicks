@@ -2,6 +2,9 @@
 
 14 October 2026. Companion to the [framework research and generation plan](drum-generation-research-plan.md).
 
+This record covers the original local-DSP phase. The subsequent neural/hybrid
+implementation and DAC model download are recorded in [the neural guide](neural-models.md).
+
 ## Completed
 
 - Added a deterministic NumPy/SciPy synthesizer for pitched kicks, modal/noise

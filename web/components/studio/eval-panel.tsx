@@ -14,7 +14,7 @@ const symbolTone: Record<string, string> = {
 /** Corpus-referenced verdicts: is this hit inside the distribution of real ones? */
 export function EvalPanel() {
   const { evaluation, evaluating, evaluate, sound } = useStudio();
-  const targets = evaluation?.backend === "diffusion" ? evaluation.control_fit?.targets : undefined;
+  const targets = evaluation?.control_fit?.targets;
 
   return (
     <div className="flex flex-col gap-3">
@@ -32,7 +32,7 @@ export function EvalPanel() {
 
       {evaluation && !evaluation.error ? (
         <div className="flex flex-col gap-3">
-          <div className="flex items-center gap-3">
+          {evaluation.likeness_pct !== undefined ? <div className="flex items-center gap-3">
             <Badge variant="outline" className="font-mono text-base">
               {evaluation.grade}
             </Badge>
@@ -43,7 +43,7 @@ export function EvalPanel() {
               </div>
               <Progress value={evaluation.likeness_pct ?? 0} />
             </div>
-          </div>
+          </div> : <p className="text-xs text-muted-foreground">Measurements below describe this render. A corpus likeness score is unavailable for this evaluation.</p>}
           <ul className="flex flex-col gap-1.5 text-sm">
             {evaluation.verdicts?.map((v) => (
               <li key={v.metric} className="flex gap-2">
@@ -57,7 +57,7 @@ export function EvalPanel() {
               {evaluation.control_fit.includes_effects
                 ? "Shaping effects are included in these measurements and can move the sound beyond its slider targets."
                 : targets
-                  ? "The render misses at least one slider target by more than 5% of that slider’s range. The diffusion model follows its sliders approximately; another variation may land closer."
+                  ? "The learned render follows its descriptor targets approximately. Compare the measurements below; another variation may land closer."
                   : "Some controls have reached this texture’s range. Try another variation for a different response."}
             </p>
           ) : null}

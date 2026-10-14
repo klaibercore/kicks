@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "kind": "rave",
+  "instrument": "hihat",
+  "checkpoint": "/absolute/path/to/rave-with-trained-prior.ts",
+  "sample_rate": 44100,
+  "temperature": 1,
+  "duration": 2,
+  "count": 4,
+  "seed": 42,
+  "device": "cpu"
+}
