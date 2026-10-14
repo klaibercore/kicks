@@ -63,6 +63,14 @@ def test_benchmark_and_blind_comparison_bind_actual_audio(tmp_path):
     key = json.loads((out/'listening/key.json').read_text())
     assert set(key[0]) == {'pair', 'a_is', 'b_is', 'a', 'b', 'a_hf', 'b_hf'}
     assert (out/'listening/listening.html').exists()
+    page = (out/'listening/listening.html').read_text()
+    assert 'Two generated candidates' in page
+    assert 'reference recording' not in page and 'VAE reconstruction' not in page
+    from kicks.analysis.fidelity import _write_listening_page
+    legacy = tmp_path/'legacy'
+    legacy.mkdir()
+    _write_listening_page(legacy, key)
+    assert 'VAE reconstruction' in (legacy/'listening.html').read_text()
     (right/'generation/case_000_seed_0.wav').write_bytes(b'changed')
     with pytest.raises(ValueError, match='identity'):
         listening_comparison(left, right, tmp_path/'bad')

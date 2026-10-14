@@ -356,7 +356,7 @@ def listening_comparison(left, right, out, *, seed=42):
                 pair[tag + suffix] = name
         pairs.append(pair)
     write_json(out/'listening'/'key.json', pairs)
-    _write_listening_page(out/'listening', pairs)
+    _write_listening_page(out/'listening', pairs, generation=True)
     report = {"instrument": a['instrument'], "method": 'matched_condition_generation_ab_v1',
               "held_out": False, "samples": [], "generation": [], "hits": [],
               "left_report_sha256": file_hash(left/'report.json'), "right_report_sha256": file_hash(right/'report.json'),

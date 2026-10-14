@@ -241,7 +241,15 @@ def _validation_indices(dataset, seed: int | None, val_split: float | None,
     return sorted(val_set.indices)
 
 
-def _write_listening_page(out: Path, pairs: list[dict]) -> None:
+def _write_listening_page(out: Path, pairs: list[dict], *, generation: bool = False) -> None:
+    description = (
+        "Two generated candidates with matched conditions, at equal RMS. "
+        "Whole hit and 2 kHz+ band. Compare attack, body, tail and variation; "
+        "tick <em>reject</em> where neither candidate is usable, then reveal."
+        if generation else
+        "One of each pair is the reference recording, the other the VAE reconstruction through the vocoder, at equal RMS. "
+        "Whole hit and 2 kHz+ band. Tick <em>reject</em> where the candidate is audibly worse, then reveal."
+    )
     rows = "\n".join(
         f'<li><b>Pair {p["pair"]:02d}</b>'
         f' <label>A <audio controls preload="none" src="{p["a"]}"></audio></label>'
@@ -254,8 +262,7 @@ def _write_listening_page(out: Path, pairs: list[dict]) -> None:
     page = f"""<!doctype html><meta charset="utf-8"><title>Blind A/B · listening</title>
 <style>body{{font:14px/1.5 system-ui;margin:24px;max-width:960px}}li{{margin:12px 0;display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center}}audio{{height:30px;width:190px}}.key{{color:#a33}}</style>
 <h1>Level-matched blind pairs</h1>
-<p>One of each pair is the reference recording, the other the VAE reconstruction through the vocoder, at equal RMS.
-Whole hit and 2 kHz+ band. Tick <em>reject</em> where the candidate is audibly worse, then reveal.
+<p>{description}
 Higher brightness alone is not an improvement.</p>
 <button id="reveal">Reveal key</button> <span id="count"></span>
 <ol>{rows}</ol>
