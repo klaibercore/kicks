@@ -1,5 +1,10 @@
 # Preserve snare and hi-hat identity
 
+Scope reviewed: **14 October 2026**. This document records the mel-VAE
+identity-control change and its historical audit. The [neural/hybrid candidates](neural-models.md)
+and [physical Synth voices](studio-implementation-20261014.md) have separate
+control paths; the measurements below do not validate those engines.
+
 The reported defect is loss of instrument identity: generic noise or blips.
 The first intervention is the actual studio synthesis path, evaluated separately
 from reconstruction of held-out examples.
@@ -44,16 +49,17 @@ from reconstruction of held-out examples.
 No model training is required to test these changes. If anchors preserve identity
 but the decoder's own reconstruction still sounds inadequate, use the existing
 tracked HF/attack-loss and capacity experiments before considering a new codec
-sequence model. The untrained waveform diffusion backend
-([`waveform-diffusion.md`](waveform-diffusion.md)) is the tracked alternative
-once that ceiling is confirmed, hi-hat first. Never train or promote against a
-descriptor score alone.
+sequence model. The [waveform diffusion backend](waveform-diffusion.md) now has
+historical hi-hat training runs and optional Studio serving. The newer
+manifest-bound families include a learned modal/noise hybrid and a matched-DAC
+prior. Their small implementation pilots do not establish an identity or fidelity
+improvement. Never train or promote against a descriptor score alone.
 
 ## Implementation and measured outcome
 
-The studio now uses corpus-anchored controls for snare and hi-hat. Kick behavior
-is unchanged. The final latent radius is 4 corpus-standardized units: radius 2
-kept the snare safe but restricted decay unnecessarily. The anchor is fixed by
+The VAE Studio engine uses corpus-anchored controls for snare and hi-hat. The
+kick VAE control path is unchanged. The final latent radius is 4 corpus-standardized
+units: radius 2 kept the snare safe but restricted decay unnecessarily. The anchor is fixed by
 the seed, and only its local descriptor-sensitive subspace moves. The waveform
 correction ceiling remains ±6 dB before peak normalization.
 

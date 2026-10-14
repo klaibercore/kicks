@@ -130,12 +130,29 @@ check a **local, matched 44.1 kHz DAC checkpoint** against a manifest's validati
 or test fold before considering a codec prior. That tool does not download
 weights or fall back to training data.
 
-## Existing neural engines
+## Neural and hybrid engines
 
 The [neural and hybrid model guide](docs/neural-models.md) covers the seven new
 trainable research families, their Studio integration, and optional isolated
 Stable Audio, RAVE and AudioCraft adapters. Candidate weights remain separate
 from the existing instrument checkpoints.
+
+Implemented families are `parameters`, `ddsp`, `noiseband`, `hybrid`, `drumgan`,
+`wavevae` and `codec`. They are original compact research implementations;
+upstream model weights use the separate adapters. To list available model types
+or serve candidates already trained on this computer:
+
+```bash
+uv run kicks neural-models
+uv run kicks serve --backend dsp --neural-root models/experiments/neural-20261014
+```
+
+The candidate root is an ignored local artifact, not part of a fresh checkout.
+For your own runs, follow the guide's frozen-manifest training example and
+configure individual weights with `--neural INSTRUMENT:KIND=PATH`.
+The implementation pilot produced 21 candidates and 84 finite, nonsilent WAVs.
+Its tiny training budgets establish execution and replay, not useful drum quality;
+blind listening and larger training remain pending.
 
 The VAE learns a global latent representation of 128-band log-mels. Its
 per-instrument defaults use DisCoder for kicks/snares and BigVGAN for hats.
@@ -160,8 +177,10 @@ tracked in Git. Analysis uses the checked-in browser-safe corpus summaries;
 regenerate them with `uv run kicks publish-analysis` after local analysis work.
 
 For training, begin with `uv run kicks dashboard`. Isolate candidate weights,
-record the experiment brief, evaluate audio and controls, then decide whether
-to promote. The neural pipeline's audio contract remains 44.1 kHz mono and
+record the experiment brief, and evaluate audio and controls. `kicks fidelity`,
+`scripts/validate_controls.py` and `kicks promote` remain VAE-specific; use
+`neural-generate` and the common waveform audits for the new candidates.
+The common one-shot audio contract remains 44.1 kHz mono and
 65,536 samples (about 1.486 seconds). Longer original recordings are retained.
 
 - [Fidelity experiments and promotion](docs/high-fidelity-generation.md)

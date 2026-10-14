@@ -4,6 +4,9 @@
 
 This record covers the original local-DSP phase. The subsequent neural/hybrid
 implementation and DAC model download are recorded in [the neural guide](neural-models.md).
+Its later validation supersedes the phase-specific test count below: 185 Python
+tests and eight frontend tests passed after neural integration. Paths in this
+record identify ignored local artifacts; a fresh checkout does not contain them.
 
 ## Completed
 
@@ -95,16 +98,20 @@ export, importing and saving the starter kit, and loading the Analysis corpus
 atlas. The browser reported no warning/error logs during these checks. MIDI
 hardware behavior and human listening quality remain untested.
 
-Final checks: **158 Python tests passed**, **8 frontend tests passed**, ESLint
-reported no issues, and the static build completed with TypeScript validation.
+Checks at the end of this DSP phase: **158 Python tests passed** and
+**8 frontend tests passed**. ESLint reported no issues, and the static build
+completed with TypeScript validation.
 The Python suite emitted two upstream deprecation warnings. The code graph was
 regenerated after the implementation changes.
 
-Main already contained the earlier training and synchronization changes. The
-only remaining feature work was `studio-diffusion`, descended directly from
+At this phase's branch audit, main already contained the earlier training and
+synchronization changes. The only remaining feature work was `studio-diffusion`, descended directly from
 main. Its Studio diffusion integration is retained alongside Synth; there are
 no divergent branch changes requiring conflict resolution. A fresh remote-ref
 audit also pruned a remotely deleted research branch.
+The integration was subsequently fast-forwarded into local `main`, and the
+merged local `studio-diffusion` branch was removed. Its remote branch remains;
+its commits are already ancestors of the consolidated main history.
 
 ## Next decisions
 
@@ -115,10 +122,14 @@ audit also pruned a remotely deleted research branch.
    balanced family-specific evaluation set and control targets.
 3. Compare existing VAE/diffusion final WAVs with the same audits and listening
    conditions. Add larger fitting pilots only after the target families are clear.
-4. Run a matched codec ceiling with local DAC weights. Stable Audio 3 Small SFX
-   remains an external candidate requiring its own isolated setup and model
-   access. Neural texture learning, a codec prior, and Faust/WASM or JUCE ports
-   remain conditional on measured quality and the intended runtime.
+4. Judge the later matched-DAC round trips and neural/hybrid pilots described
+   in the [neural guide](neural-models.md). Learned texture and codec-prior paths
+   are now implemented, with larger training and listening still pending.
+   Stable Audio, RAVE and AudioCraft adapters require separate environments and
+   local assets before real inference can be validated. Faust/WASM and JUCE ports
+   remain future options if the intended runtime requires them.
 
-No pretrained model was downloaded, no candidate weights were promoted, and no
-new large training job was started by this work.
+During this DSP phase, no pretrained model was downloaded and no new large
+training job was started. The subsequent neural phase downloaded one matched
+DAC artifact and ran bounded implementation pilots. Neither phase promoted
+candidate weights or collected human listening verdicts.

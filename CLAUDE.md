@@ -2,8 +2,8 @@
 
 ## Scope and source of truth
 
-- Project: profile-driven drum synthesis, VAE training, audio evaluation, a FastAPI backend, a static Next.js studio, and procedural drum synthesis. The app is local, with no accounts, billing or sales surfaces.
-- Human setup and product guide: `README.md`. Experiment sequence and research rationale: `docs/high-fidelity-generation.md`. Snare/hi-hat identity controls and their measured audit: `docs/audio-identity-plan.md`. Waveform diffusion backend, its 8 GB Apple Silicon measurements and known issues: `docs/waveform-diffusion.md`.
+- Project: profile-driven procedural and neural drum synthesis, tracked research training, audio evaluation, a FastAPI backend and a static Next.js Studio/Analysis frontend. The app is local, with no accounts, billing or sales surfaces.
+- Human setup guide: `README.md`. Framework choices and decision gates: `docs/drum-generation-research-plan.md`. Neural/hybrid setup and pilot limits: `docs/neural-models.md`. VAE ablations: `docs/high-fidelity-generation.md`. VAE identity controls and measured audit: `docs/audio-identity-plan.md`. Waveform diffusion design, historical measurements and fixed review issues: `docs/waveform-diffusion.md`.
 - Read current code and `git diff` before changing behavior. Local corpora, checkpoints and active jobs can change independently of Git; inspect them before making claims about the current model.
 - Preserve unrelated work. Do not restart an existing training process to attach telemetry.
 - Corpus identity and licensing after the numeric rename are anchored by `data/corpus_ids.json` and the three local `data/{kicks,snares,hihats}/SOURCES.md` files. Preserve them. The Modal `kicks-corpus` volume intentionally contains WAVs only; remote verification must require exact names, sizes and SHA-256 hashes but must not require or upload `SOURCES.md`.
@@ -23,6 +23,9 @@ uv run kicks --help
 uv run kicks instruments
 uv run kicks dashboard                       # Loopback viewer :6060
 uv run kicks serve                           # API :8080
+uv run kicks serve --backend dsp             # No corpus or checkpoint required
+uv run kicks neural-models                   # Seven local research families
+uv run kicks serve --backend dsp --neural-root models/experiments/neural-20261014  # Existing local pilots only
 uv run kicks serve --vocoder bigvgan          # Override all instrument defaults
 uv run kicks serve --griffin-lim              # No neural vocoder download; VAE still required
 uv run kicks serve -i hihat --diffusion hihat=models/experiments/modal-hihat-full-200/hihat/diffusion_best.pth   # Experimental diffusion engine beside the VAE
@@ -48,7 +51,7 @@ uv run pytest -q
 
 Instrument-aware commands use `-i` / `--instrument`; commands such as `dashboard`, `instruments` and `publish-analysis` do not take that option. Script arguments differ: `scripts/validate_controls.py` uses `--instrument`, not `-i`.
 
-Website, from `web/`: `pnpm install`, `pnpm dev` (:3000), `pnpm lint`, `pnpm build` (static export to `out/`). Use a static server to inspect the export.
+Website, from `web/`: copy `.env.example` to `.env.local`, then `pnpm install`, `pnpm dev` (:3000). Checks: `pnpm lint`, `pnpm test`, `pnpm build` (static export to `out/`). Use a static server to inspect the export.
 
 The API defaults to loopback. `kicks serve --backend dsp` starts without samples or neural weights. Physical controls have explicit units and are not descriptor targets.
 
@@ -62,7 +65,7 @@ preserves existing local `notes.json` and `notes.js`. `live` mirrors one job's
 run record into the local dashboard while it trains (read-only, no checkpoints);
 its lag is the launch's `--commit-interval-seconds` plus one poll.
 
-### Before training
+### Before VAE training
 
 1. Check the active processes, available device, source checkpoint metadata and corpus. Use the existing dashboard or start `uv run kicks dashboard`.
 2. Review a comparable baseline. Fix the corpus, split seed, preprocessing, vocoder and evaluation settings; isolate the change under test.
@@ -85,7 +88,7 @@ uv run kicks train -i kick \
   --success-criteria "Compare HF errors, blind listening and control errors with a matched baseline"
 ```
 
-### CLI training defaults and experimental options
+### VAE CLI training defaults and experimental options
 
 | Option | Default | Contract |
 |---|---|---|
@@ -117,7 +120,7 @@ uv run kicks train -i kick \
 - Never edit metrics to improve a curve. Never fabricate missing history or infer listening quality from a proxy.
 - Do not promote solely because a scalar improved. Keep the decision field current with evidence and outstanding checks.
 
-### After training: audio evidence
+### After VAE training: audio evidence
 
 Evaluate the exact candidate with the intended instrument, corpus and vocoder. `--run` selects the split and report destination; it does **not** infer the candidate checkpoint, instrument or custom corpus path. Pass those explicitly when needed.
 
@@ -137,7 +140,7 @@ uv run python scripts/validate_controls.py --instrument kick --run YOUR_RUN_ID \
 - The split fingerprint includes seed, ratio, dataset length and ordered resolved paths/sizes/mtimes. It is not a byte-content hash and does not detect related samples or pack leakage. Preserve this limitation in reports.
 - Controls audit: `--checkpoint` and `--out` are required; `--corners` adds corner probes, `--random` controls random probes, `--run` attaches evidence. Dataset selection follows the instrument profile/environment.
 
-### Promotion
+### VAE promotion
 
 ```bash
 uv run kicks promote -i kick --run YOUR_RUN_ID \
@@ -149,6 +152,17 @@ uv run kicks promote -i kick --run YOUR_RUN_ID \
 - `--allow-missing-evidence` bypasses only missing evidence and records the missing kinds. Use only within the user's requested scope and explain the absent evidence in the decision.
 - Promotion copies to `profile.paths.checkpoint`, saves the prior weights as `vae_best_prev.pth`, carries an available `<stem>.controls.npz`, and writes the new SHA-256 and paths to the run.
 - Check the destination root/environment and use a separate candidate path. Restart the serving process only when that operation is within the task's authorization; model instances remain cached until reloaded. Calibration detects stale sidecars and refits on first use.
+
+### Manifest-bound neural/hybrid workflow
+
+- `benchmark-freeze --out MANIFEST` creates a byte-hashed, source-group/exact-duplicate manifest. Review warnings and train/validation/test coverage; unresolved components stay training-only. This improves known grouping, not near-duplicate detection or missing provenance.
+- `neural-train --kind KIND -i INSTRUMENT --manifest MANIFEST --out NEW_DIRECTORY --intent "…" --hypothesis "…" --success-criteria "…"` trains an isolated candidate. Set explicit epoch, step and sample budgets. CPU is the default; CUDA is supported, MPS is excluded by the FFT path. There is no resume option; a new invocation starts a new model and optimizer.
+- The trainer verifies source bytes and fits statistics on training rows only. Validation and test never fall back to training. `parameters` requires a verified same-manifest/instrument fitted `--bank` and has no parameter-validation fold; `codec` requires one matched local native 44.1 kHz `--codec-checkpoint`.
+- `best.pth` and `last.pth` use `model_kind="drum_research_v1"`, with family, architecture, instrument/descriptor order, audio contract, source/manifest identities and training status. Load with `weights_only=True` and reject mismatches or untrained checkpoints. Codec inference verifies the exact decoder SHA-256.
+- `neural-generate --checkpoint PATH --out NEW_DIRECTORY` writes fresh WAVs, descriptor targets, identities and `audit/report.json`. For matched comparisons pass the same complete raw `--conditions` JSON rows, seed and count; compare the resulting `audit/` directories with `listening-compare`. Fresh generation has no paired reconstruction reference by default.
+- Serve candidates with repeatable `--neural INSTRUMENT:KIND=PATH`, `KICKS_RESEARCH`, or explicit `--neural-root ROOT` discovery of `ROOT/INSTRUMENT-KIND/best.pth`. Candidates load lazily; `--backend auto` still prefers VAE, configured waveform diffusion, then DSP. New candidates are never automatically selected or promoted. API candidate device defaults to CPU; `KICKS_RESEARCH_DEVICE=cuda` overrides it.
+- Optional upstream adapters use `external-generate --spec JOB.json --python ISOLATED_PYTHON --out NEW_DIRECTORY`. Keep providers separate from the project environment. Local assets and nested cached components must exist; preserve native FLOAT audio and the explicit conforming steps. Do not treat text prompts as numerical descriptor conditioning.
+- Current evidence: 21 tiny candidate pilots and 84 finite, nonsilent WAVs. No listening judgments, useful-quality guarantee or promotion. Exact budgets, corpus coverage, artifact paths and upstream setup limits are in `docs/neural-models.md`.
 
 ## Tracking records and metric semantics
 
@@ -178,6 +192,7 @@ Notebook keys: `objective`, `hypothesis`, `success_criteria`, `observations`, `d
 - `active_dims`: per-dimension mean raw KL > 0.01 nats; `raw_kl` is unclamped to free bits. Activity does not establish fidelity.
 - `eval_proxy`: descriptor-distribution mismatch, lower is better; not a perceptual quality rating.
 - Waveform diffusion runs use the same writer and viewer, keyed by `config.backend`. `train_loss` draws noise levels at random with conditioning dropout; `val_loss` holds each hit at a fixed level with fixed noise and full conditioning, so the two are not comparable. `val_loss_{low,mid,high}_sigma` split that error by noise level. `control_mae` is the descriptor-target error of freshly sampled hits in training-set standard deviations — a controllability proxy, measured on a few samples at reduced step count, not a perceptual rating and not a substitute for `scripts/validate_controls.py`. The viewer refuses to treat a VAE run and a diffusion run as a like-for-like comparison.
+- Neural/hybrid runs use family-specific objective labels and the frozen manifest/selected-source fingerprint. Do not equate their losses with VAE mel KPIs or across families. Parameter-bank selection is training-only, with validation loss null. GAN objectives can be negative and use a linear train-loss axis.
 - Fidelity waveform errors use a 512-point Hann STFT, hop 128, reference bins above −70 dBFS and profile attack/body windows. Keep them distinct from the live mel KPIs and corpus realism scores.
 
 ## Architecture map
@@ -193,6 +208,7 @@ Notebook keys: `objective`, `hypothesis`, `success_criteria`, `observations`, `d
 | `audio/controls.py`, `audio/effects.py` | Bounded STFT waveform correction, then user effects |
 | `nn/vae.py`, `config.py` | VAE options, device selection (CUDA > MPS > CPU), metadata-aware checkpoint loading |
 | `nn/diffusion.py` | `WaveformUNet`, the angular v-prediction schedule, FiLM/null conditioning and the deterministic `v_sample` |
+| `nn/ddsp.py`, `nn/research.py` | Differentiable modal/noise renderer and seven original conditional model families |
 | `nn/discoder.py` | Inference port plus upstream `DISCODER_LICENSE`; fine-tuned DAC decoder from `descript-audio-codec` |
 | `analysis/descriptors.py`, `analysis/basis.py` | Descriptor measurements; PCA or closed-loop descriptor solve |
 | `analysis/calibration.py` | Fingerprinted descriptor basis and calibrated slider ranges |
@@ -201,11 +217,14 @@ Notebook keys: `objective`, `hypothesis`, `success_criteria`, `observations`, `d
 | `analysis/clustering.py`, `analysis/publish.py` | Corpus report, cluster audio, sanitized browser publication |
 | `training/loss.py`, `training/trainer.py` | Base/experimental objectives, baseline, schedules, checkpoint selection |
 | `training/diffusion.py` | v-prediction objective, conditioning dropout, EMA, fixed-level validation and the descriptor-target proxy |
+| `training/research.py` | Manifest-bound, budgeted candidate training and family-specific objectives |
 | `training/tracking.py`, `training/dashboard.html` | Standard-library loopback server, lifecycle, notes, evidence and local charts |
 | `training/promotion.py` | Candidate copy and recorded decision; `PromotionRefused` |
 | `synthesis/generator.py` | Corpus-fitted GMM prior and best-of-k generation |
 | `synthesis/identity.py`, `synthesis/controlled.py` | Corpus-anchored `IdentityBasis` (radius 4, ±6 dB correction cap, `.identity.npz` cache) and the single rendering path shared by studio previews, exports and the control audit |
 | `synthesis/diffusion.py` | Descriptor targets resampled from the checkpoint's label bank (nearest rows when pinned); sampling with separate texture and slider seeds |
+| `synthesis/research.py` | Strict candidate loading, seeded generation and common waveform audits |
+| `synthesis/external.py`, `external/worker.py` | Isolated local-weight upstream inference, native audio preservation and explicit one-shot conversion |
 | `corpus/` | Backed-up stripping; quarantine with a manifest |
 | `api/` | Local FastAPI routes, lazy instrument/backend caches, WAV export and rate limiting |
 | `cli.py`, `sweep.py` | Lazy command implementations; API control-space sweep |
@@ -240,7 +259,8 @@ Paths in the table are relative to `kicks/`.
 ## API and local web app
 
 - `ServerState` loads instruments lazily. Vocoders cache by `(backend, weights_dir)`; `/health` reports profile mode and a backend map unless forced. Serving instances do not hot-reload promoted checkpoints.
-- Routes: `/health`, `/instruments`, `/config`, `/generate`, `/evaluate`, `/spectrogram`, `POST /export`. Exports are local 24-bit WAV downloads. Synthesis requests select `instrument`; `/spectrogram` is pre-vocoder, `/evaluate` scores rendered/effected audio. `backend=diffusion` (with `steps` 10–200) routes `/config`, `/generate`, `/evaluate`, `/spectrogram` and `/export` to a served diffusion checkpoint: sliders map by quantile onto the checkpoint's label bank (1st–99th percentile, median at centre), renders are peak-normalised to 0.9, walked one at a time off the event loop, cached apart from effects, and dropped if the client left while queued; `/spectrogram` is then the mel of the render.
+- Routes: `/health`, `/instruments`, `/config`, `/generate`, `/evaluate`, `/spectrogram`, `POST /export`. Exports are local 24-bit WAV downloads. Synthesis requests select `instrument` and `backend`. The VAE spectrogram is pre-vocoder; DSP/diffusion/research spectrograms come from rendered audio. `/evaluate` measures rendered/effected audio. `backend=diffusion` (with `steps` 10–200) routes synthesis endpoints to a configured waveform checkpoint: sliders map by quantile onto the label bank (1st–99th percentile, median at centre), renders are peak-normalised to 0.9, walked one at a time off the event loop, cached apart from effects, and dropped if the client left while queued.
+- New research backends use descriptor quantile sliders, seeded lazy inference and a render identity including checkpoint SHA-256/controls/seed/steps. `codec` exposes sampler steps. Their evaluation reports `corpus_available=false` plus waveform metrics and measured-versus-requested descriptor errors; the frontend must not invent a realism score. DSP uses namespaced physical `voice_` controls, not descriptor targets.
 - Sliders accept `s1..sN`, legacy `pc1..pcN`, or exposed names. With PCA, map names through `SliderBasis.names`; labels are discovered during fitting. Effects: `attack_ms`, `decay_ms`, `drive`, `filter`.
 - Shared token bucket: 10 requests/second; LRU: 100 entries, keyed by query. `web/lib/api/` sorts sound query keys for consistent caching.
 - `web/`: Next.js 16 / React 19, static export, Tailwind 4, shadcn on Base UI. Use Base UI `render={<Link/>}` composition, not Radix `asChild`. Routes use trailing `/`. Studio is client-only for AudioContext/MIDI/localStorage. Respect the React Compiler lint rules.
@@ -253,8 +273,9 @@ Paths in the table are relative to `kicks/`.
 - Loss/model/schedules/fidelity/promotion: `uv run pytest -q tests/test_high_fidelity.py`; add/run checks covering the changed behavior.
 - Tracking/dashboard: `uv run pytest -q tests/test_training_tracking.py`; inspect desktop/mobile charts, live updates, note preservation and standalone HTML when UI behavior changes. The viewer serves both backends, so check a VAE run and a diffusion run, plus the Listening lab against a real `output/fidelity/*` report. The template is read per request, so HTML edits are live at once; server-side changes in `tracking.py` need the viewer restarted (the training process is separate and keeps its own copy). Fidelity detail responses include corpus sample paths — the viewer is loopback-only and never a publication path.
 - Waveform diffusion: `uv run pytest -q tests/test_diffusion.py tests/test_make_subset.py tests/test_diffusion_listening.py tests/test_modal_train.py tests/test_rename_corpus.py`. The Modal wrapper tests cover its local contracts only (corpus verification, spec validation, the restart guard, periodic commits, note-preserving sync); cloud behaviour is established by the reviewed gates in `docs/modal-training.md`. The tests cover the schedule, conditioning, target drawing, determinism, checkpoints, the tracked loop, subset building and the listening-pair writer only; they establish nothing about how the backend sounds. Evidence for this backend is `kicks eval --pattern`, the direct tail-floor / onset measurements and blind pairs from `scripts/diffusion_listening.py` (a generation A/B with `held_out: false`, never a reconstruction fidelity report); `kicks fidelity` and `scripts/validate_controls.py` are VAE-only.
+- Neural/hybrid and upstream adapters: `uv run pytest -q tests/test_neural_models.py tests/test_api_research.py tests/test_external_models.py`. These check gradients, replay, bounded training, source folds, metadata/codec guards, API preview/export and provider interfaces. Fake codec/provider tests do not establish real upstream compatibility or audio quality. Consult the neural guide for actual local DAC/pilot evidence and pending setup.
 - Controls/calibration/vocoders: relevant `tests/test_audio_controls.py` / `tests/test_discoder.py`; use matched waveform/control audits when claiming audio improvement. For snare/hi-hat identity changes, rerun `scripts/validate_controls.py --control identity --texture-seeds ...` and `scripts/compare_identity.py`, and report multi-onset counts and target errors separately for centre, axis and random probes.
-- Website: from `web/`, `pnpm lint` then `pnpm build`; inspect affected views. Publishing generated analysis is a separate write step, not part of ordinary lint/build checks.
+- Website: from `web/`, `pnpm lint`, `pnpm test`, then `pnpm build`; inspect affected views. Publishing generated analysis is a separate write step, not part of ordinary lint/build checks.
 - Report what was actually measured. Automated checks, proxy scores and listening evidence are separate claims.
 
 ## graphify

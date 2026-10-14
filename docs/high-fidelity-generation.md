@@ -1,5 +1,11 @@
 # High-fidelity generation and training observability
 
+Status reviewed: **14 October 2026**. The ablation workflow below applies to
+the mel VAE. The [neural and hybrid guide](neural-models.md) documents seven
+additional implemented families, including a matched-DAC latent prior, and their
+small implementation pilots. Neither those pilots nor the historical waveform
+diffusion runs establish a listening-quality winner.
+
 ## Recommendation
 
 Use one workflow: establish the fidelity baseline, track every experiment,
@@ -28,7 +34,7 @@ to validate, not measured improvements of a new model.
 | 3 | `kicks train --residual --latent-skips [--latent-dim 64\|128] --model-dir …` | `architecture` block in run config and checkpoint; the dashboard names a same-data, different-architecture comparison as such |
 | 4 | `kicks fidelity --run <run-id> --checkpoint <candidate>`; `scripts/validate_controls.py --run <run-id> --checkpoint <candidate> --out …` | `report.json`, `listening/listening.html` (blind pairs), the run's **Evidence** card |
 | 5 | `kicks promote --run <run-id> --checkpoint <candidate> --decision "…"` | promotion entry in Evidence, sha256 and paths appended to **Decision** |
-| 6 | not implemented — contingent on the stage-5 outcome | — |
+| 6 | `kicks codec-audit --manifest … --checkpoint …`; `kicks neural-train --kind codec --codec-checkpoint …` with the required experiment brief and a new output directory | Matched encode/decode reports, manifest/checkpoint identities, tracked prior objective and fresh-generation audits; see the [neural guide](neural-models.md) |
 
 The stage-2 terms keep the existing transient penalty for unwanted tail noise
 and add what it lacks: `hf_detail_loss` charges missing and excess HF energy
@@ -40,6 +46,10 @@ plain network, so an option run and its baseline begin from the same function.
 `kicks fidelity` reproduces the run's validation split from its fingerprint and
 measures on those held-out hits; when the corpus has changed since, it says so
 and samples the whole corpus instead.
+That fallback is explicitly not held out. The newer manifest-bound neural
+trainer and `codec-audit` refuse missing evaluation folds rather than using
+training data. `kicks fidelity`, `scripts/validate_controls.py` and
+`kicks promote` do not operate on the new families or waveform diffusion.
 
 ### Tracking workflow
 
@@ -57,6 +67,12 @@ raw in the record and the table when smoothing is enabled. Standalone
 comparing runs use the local HTTP viewer. The page loads its typeface from
 Google Fonts when online and falls back to system fonts offline; no account is
 needed.
+
+Waveform diffusion and the seven research families share this writer/viewer,
+with family-specific objective labels. Their losses are not comparable to VAE
+mel errors or across unrelated families. The parameter CVAE selects by training
+parameter loss and has no held-out parameter-validation score. GAN objectives
+can be negative; their training chart uses a linear scale.
 
 Before training, complete **Objective**, **Hypothesis** and **Success criteria**.
 During training, update **Observations** with epoch references, trends and
@@ -82,8 +98,9 @@ only when data, split and objective match; the viewer flags known mismatches.
   limitation of the dedicated term, not a claim that missing tails are free.
   The stage-2 `hf_detail_loss` exists for exactly this probe: it returns the
   same value for both edits (`tests/test_high_fidelity.py`).
-- The current multi-resolution loss pools one mel spectrogram. It does not
-  analyze the waveform with several different FFT windows.
+- The VAE's multi-resolution loss pools one mel spectrogram. The separate
+  differentiable synthesis and waveform-VAE candidates use actual multi-window
+  waveform losses; this does not add a waveform objective to the mel VAE.
 - In the saved 16-kick DisCoder comparison, mean active-mel error rises from
   3.70 dB for direct vocoding to 6.81 dB with the VAE. A separate 512-point
   STFT diagnostic finds 8–16 kHz body error rising from 5.28 to 7.28 dB.
@@ -92,8 +109,8 @@ only when data, split and objective match; the viewer flags known mismatches.
   benchmark or listening-quality score. Details are in
   `output/calibration/high-end-diagnosis.json`.
 - Existing corpus realism scores and accurate descriptor controls do not
-  establish that fine texture, phase or transient fidelity is commercially
-  adequate. Keep their role separate from fidelity and listening tests.
+  establish fine texture, phase or transient fidelity. Keep their role separate
+  from fidelity and listening tests.
 
 ## Which skip connections help generation?
 
@@ -129,6 +146,10 @@ evaluation fixed:
    Backpropagation through a frozen vocoder still requires activation memory.
    Keep the first local experiments on the smaller VAE.
 
+The third experiment, backpropagating waveform losses through the existing mel
+vocoder, remains unimplemented. The new waveform-trained families are separate
+experiments and do not complete this VAE fine-tuning step.
+
 The DAC work provides evidence for multi-window reconstruction and multi-band
 spectral discriminators. Its recipe is a research starting point, not a set of
 loss weights to copy without calibration.
@@ -157,16 +178,22 @@ encoder/decoder pair: DisCoder's fine-tuned DAC decoder is not automatically
 interchangeable with a stock DAC encoder. DisCoder changes that latent mapping
 during fine-tuning. [DisCoder paper](https://arxiv.org/html/2502.12759v1).
 
-Latent audio diffusion is an established approach, but the quality and training
-cost of a small drum-specific implementation remain to be measured here.
+Latent audio diffusion is an established approach; useful drum quality and
+training cost still require a larger, controlled experiment here.
 [Latent audio diffusion](https://arxiv.org/abs/2402.04825).
 
-A simpler variant — diffusion directly on the 65,536-sample waveform, with no
-codec and no vocoder — is implemented and untrained in `kicks/nn/diffusion.py`;
-[`docs/waveform-diffusion.md`](waveform-diffusion.md) records its design, the
-8 GB Apple Silicon cost measurements, the staged run sequence and two known
-issues to fix before collecting evidence. It is the first candidate for this
-stage; the codec-latent prior above remains a proposal.
+The implemented `codec` candidate uses a temporal transformer with angular
+v-diffusion over quantized continuous DAC latents. The frozen encoder/decoder
+must come from one byte-identified native 44.1 kHz artifact. Three held-out
+hi-hat round trips and three sixteen-update prior pilots ran locally. They
+confirm the path executes; the codec's audible ceiling and the prior's useful
+generation quality remain unjudged. Codec pretraining overlap is unknown.
+
+Direct diffusion on the 65,536-sample waveform is also implemented in
+`kicks/nn/diffusion.py` and was trained on hi-hat subsets in September 2026.
+The [waveform diffusion notes](waveform-diffusion.md) retain its historical
+measurements, fixed review defects, unresolved audio issues and optional Studio
+serving instructions. Both paths remain experimental and separate from the VAE.
 
 ## Acceptance criteria
 

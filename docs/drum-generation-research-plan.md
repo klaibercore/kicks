@@ -1,6 +1,6 @@
 # Research and plan for kick, snare and hi-hat generation
 
-Research date: **14 October 2026**. Scope: controllable, production-quality drum
+Research date: **14 October 2026**. Scope: controllable, high-fidelity drum
 one-shots for this repository's studio, with a possible browser or DAW instrument
 later. This is a research-backed proposal; it does not report a new listening
 test, model benchmark or training run. Numerical settings below are proposed
@@ -14,6 +14,19 @@ below retain their research context; they are not all implemented or validated.
 The subsequent request to implement the neural/hybrid candidates is documented
 in the [neural model guide](neural-models.md), including original local model
 families, isolated upstream adapters and the exact limits of their validation.
+
+Current implementation status on that date:
+
+- Local Studio/Analysis, all three DSP voices, physical presets, fitting,
+  source-group manifests and common waveform/listening adapters are implemented.
+- Seven original neural/hybrid families are trainable and selectable in Studio.
+  Twenty-one tiny candidate pilots produced 84 audited WAVs; no model was promoted.
+- A matched native 44.1 kHz DAC ceiling path and latent prior ran locally.
+  Stable Audio, RAVE and AudioCraft adapters have provider-interface tests;
+  real upstream inference still requires isolated environments and local assets.
+- Balanced provenance/articulation labels, larger training, control/novelty audits
+  and blind judgments remain open. The original decision gates below are quality
+  criteria, not claims that implementation pilots passed them.
 
 ## Recommended direction
 
@@ -59,7 +72,7 @@ research references, with different maturity and deployment constraints.
 | **Stable Audio 3 / stable-audio-tools** | Current pretrained latent audio generation and associated inference/training tooling. The Small SFX model supports variable-length generation and editing. | Benchmark **`stabilityai/stable-audio-3-small-sfx`** as an external text-to-sound candidate in an isolated environment. A prompt is not a calibrated timbre slider; measure single-hit success and onset placement. Model access and component terms are separate from the tools' MIT license. [Model card](https://huggingface.co/stabilityai/stable-audio-3-small-sfx), [tools](https://github.com/Stability-AI/stable-audio-tools) |
 | **Descript Audio Codec (DAC)** | A pretrained waveform encoder/decoder, including native 44.1 kHz models; code and published weights are MIT licensed. | First codec to test for a custom latent-sequence generator. A codec compresses audio; it still needs a learned prior to generate new hits. [DAC](https://github.com/descriptinc/descript-audio-codec) |
 | **RAVE** | Waveform autoencoding, streaming export and optional latent-prior training, with multiple model configurations. | Secondary candidate if fast neural decoding becomes central. Adapt the training window and evaluate transient handling; real-time export alone does not establish drum quality. [RAVE](https://github.com/acids-ircam/RAVE) |
-| **AudioCraft / AudioGen / MusicGen** | PyTorch research tooling for general sound and music generation. Published code is MIT; published model weights are CC-BY-NC 4.0. | Useful references, lower priority for this commercial studio and precise one-shot controls. The repository currently documents an older PyTorch environment, so isolate any experiment. [AudioCraft](https://github.com/facebookresearch/audiocraft) |
+| **AudioCraft / AudioGen / MusicGen** | PyTorch research tooling for general sound and music generation. Published code is MIT; published model weights are CC-BY-NC 4.0. | Useful external references for this local research studio; precise one-shot controls still need evaluation. The repository documents an older PyTorch environment, so isolate any experiment. [AudioCraft](https://github.com/facebookresearch/audiocraft) |
 
 Two particularly relevant research results:
 
@@ -72,7 +85,7 @@ Two particularly relevant research results:
   [implementation](https://github.com/SonyCSLParis/DrumGAN).
 - **NoiseBandNet** learns time-varying gains over noise bands for inharmonic sound
   effects. Its reported experiments concern effects such as footsteps, knocking
-  and metal, so applying it to hats/snare wires is our proposed experiment.
+  and metal, so our compact hat/snare-wire implementation is an adaptation to test.
   The reference implementation is AGPL-3.0; account for that if reusing code.
   [Paper](https://arxiv.org/abs/2307.08007),
   [implementation](https://github.com/adrianbarahona/noisebandnet).
@@ -179,20 +192,22 @@ Reuse the existing tracking, Listening lab and descriptor infrastructure.
 The [fidelity plan](high-fidelity-generation.md) still supplies the VAE ablation
 sequence. The [diffusion notes](waveform-diffusion.md) contain historical runs
 and costs; inspect actual artifacts before making a current quality claim.
-Some older prose calls diffusion untrained or unavailable in the studio,
-whereas current API code supports optional experimental serving.
+Waveform diffusion has historical hi-hat training runs and supports optional
+experimental serving; its quality remains unjudged.
 
 The current `kicks fidelity` and `scripts/validate_controls.py` paths are
-VAE-specific. A common benchmark adapter is required before applying their
-workflow to DSP, hybrid or diffusion output. Existing promotion is also
-VAE-oriented; serving an experimental engine and promoting it are different steps.
+VAE-specific. The implemented `benchmark-audio` and `listening-compare` commands
+provide common final-waveform audits and matched-condition blind comparisons
+for DSP, hybrid and diffusion WAVs. `neural-generate` writes this audit directly.
+Existing promotion is still VAE-oriented; serving an experimental engine and
+promoting it are different steps.
 
 For the first comparison, retain the existing audio contract. Audit how many
 reference tails it truncates, especially open hats and long kicks. Any longer
 window, stereo or native 48 kHz path needs its own representation/checkpoint
 version. Resampling an output does not restore detail lost during training.
 
-Proposed hybrid architecture:
+Hybrid architecture used as the implementation direction:
 
 ```mermaid
 flowchart LR
@@ -280,7 +295,7 @@ Stage 4 details:
 - For a custom codec generator, keep the encoder/decoder pair matched. The
   project's DisCoder decoder is fine-tuned and is not automatically compatible
   with stock DAC encoder latents; establish that separately if considering it.
-  See the existing [codec proposal](high-fidelity-generation.md#higher-ceiling-generate-an-audio-codec-latent-sequence).
+  See the [codec design and implementation status](high-fidelity-generation.md#higher-ceiling-generate-an-audio-codec-latent-sequence).
 - Cache latents and freeze the codec for the first prior experiment. Compare
   quality against compute at several sampler step counts. Increase dataset/model
   size only after a small pilot demonstrates learning and acceptable reconstruction.
@@ -351,5 +366,7 @@ Proposed release targets, to freeze after the pilot and before final evaluation:
 Choose the winner **per instrument and sound family**. If procedural kicks win,
 sample-based acoustic hats remain the strongest fidelity reference, and neural
 snares win on novel texture, the engine registry should support that result.
-The immediate next deliverable is the frozen benchmark plus a kick DSP proof
-of concept, followed by snare and hat voices under the same evaluation contract.
+The benchmark tooling, three DSP voices and neural/hybrid candidate paths now
+exist. The next evidence to collect is owner listening feedback on the retained
+auditions, reviewed corpus labels and a bounded larger experiment for the most
+promising instrument/family. Faust/WASM and JUCE remain future runtime options.

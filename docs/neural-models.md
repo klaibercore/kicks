@@ -33,8 +33,9 @@ received the NumPy renderer's oversampling/aliasing audit.
 
 ```bash
 uv run kicks neural-models
+uv run kicks benchmark-freeze --out output/benchmarks/my-corpus.json
 uv run kicks neural-train --kind hybrid -i hihat \
-  --manifest output/benchmarks/research-20261014-corpus-v2.json \
+  --manifest output/benchmarks/my-corpus.json \
   --out models/experiments/my-hihat-hybrid \
   --epochs 2 --max-steps 32 --limit 32 --validation-limit 8 --batch-size 2 \
   --intent "Improve evolving hi-hat texture" \
@@ -102,7 +103,18 @@ uv run kicks serve --backend dsp --neural-root models/experiments/neural-2026101
 ```
 
 `--neural-root` reads existing `INSTRUMENT-KIND/best.pth` directories explicitly;
-it does not train or promote weights. The current browser preview uses port 8091.
+it does not train or promote weights. These pilot directories are local and
+ignored; a fresh checkout must train candidates or supply compatible checkpoints.
+The API defaults to `127.0.0.1:8080` and the web app to port 3000, as in the
+[README setup](../README.md#start-the-studio). If using `--port 8091` for a second
+API, set `NEXT_PUBLIC_KICKS_API_URL=http://127.0.0.1:8091` before starting the web
+app. API candidates run on CPU unless `KICKS_RESEARCH_DEVICE=cuda` is set.
+
+The new candidates report waveform measurements and requested-versus-measured
+descriptors. They do not provide a fitted corpus realism score. Existing
+`kicks fidelity`, `scripts/validate_controls.py` and `kicks promote` remain
+VAE-specific. Use the candidate's `audit/` directory for common waveform and
+matched listening comparisons; choosing a Studio engine is not promotion.
 
 ## Optional upstream integrations
 
@@ -163,6 +175,14 @@ accept either on the owner's behalf.
 
 ## What ran locally
 
+The source manifest was
+`output/benchmarks/research-20261014-corpus-v2.json`, SHA-256
+`3055e152d5f684b5f11e76352408cabb7b06a34e5b540d4e7bafbee558303b94`:
+23,372 training, 510 validation and 45 test hits. Unresolved-source components
+remain training-only (22,690 hits). These uneven splits protect known groups
+and exact duplicates; they do not establish complete provenance or rule out
+near-duplicate leakage. Review source and articulation labels before scaling.
+
 - Twenty-one candidate checkpoints: all seven families for all three instruments.
 - Eighteen non-codec implementation pilots: up to four optimizer updates on at
   most eight training hits, with two validation hits where supported. The first
@@ -182,6 +202,14 @@ Artifacts are under `models/experiments/neural-20261014/`,
 ignored local artifacts. The native DAC source/identity record lives beside
 the weight file in `models/experiments/codecs/`.
 `output/neural-20261014/audition.html` offers all 84 pilot WAVs in one page.
+To inspect that local catalog:
+
+```bash
+python3 -m http.server 8094 --bind 127.0.0.1 --directory output/neural-20261014
+```
+
+Open `http://127.0.0.1:8094/audition.html`. This serves the existing audio and
+does not generate or judge new hits.
 
 These budgets exercise implementation and checkpoint replay; they are far too
 small to establish useful learned drum quality. No listener has judged them,
@@ -190,10 +218,10 @@ training, aliasing/control/novelty audits and blind listening remain necessary.
 
 ## Validation
 
-The final suite passes **185 Python tests**, including gradients and seeded
-replay for every local family, bounded training, source separation, codec
+After the 14 October implementation, **185 Python tests passed**, including
+gradients and seeded replay for every local family, bounded training, source separation, codec
 identity checks, provider interfaces and API preview/export agreement.
-All **8 frontend tests**, ESLint, TypeScript and the static build pass.
+All **8 frontend tests**, ESLint, TypeScript and the static build passed.
 Two existing upstream deprecation warnings remain in the Python suite.
 
 Browser checks exercised the new selector, learned-hybrid preview, rendered

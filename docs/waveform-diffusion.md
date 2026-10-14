@@ -2,18 +2,21 @@
 
 ## Status
 
-The backend exists as code: a denoiser, a corpus loader, a tracked training
-loop, a deterministic sampler and two commands. On 2026-09-20 it was trained
+Status reviewed: **14 October 2026**. This direct-waveform engine is separate
+from the newer matched-DAC `codec` prior in the [neural/hybrid guide](neural-models.md).
+It has a denoiser, corpus loader, tracked training loop, deterministic sampler,
+CLI commands and optional Studio integration. On 2026-09-20 it was trained
 for the first time, on stratified hi-hat subsets of 64, 256 and 1,000 hits on
 an 8 GB M1; the measurements are under [First runs](#first-runs). **No
-checkpoint has been listened to blind yet, none is served, and there is no
-promotion path.** The sections before *First runs* describe the design and
+checkpoint has been listened to blind yet, and there is no
+promotion path.** Optional serving was added on 2026-09-27; see
+[Serving in the studio](#serving-in-the-studio). The sections before *First runs* describe the design and
 its cost; they report configuration values, not results.
 
 This implements the plan in issue #3. The issue's open questions were settled
-as recorded under [Decisions](#decisions-taken); the rest of the plan — training,
-the fidelity and control audits, blind listening, latency benchmarking — is
-still ahead.
+as recorded under [Decisions](#decisions-taken). Training pilots and initial
+measurements exist; matched fidelity/control audits and blind listening remain
+needed before a quality decision.
 
 Reviewed and merged into `main` on 2026-09-19. The review ran the test module
 and a step-time / memory probe of the untrained network on an Apple M1 with
@@ -39,7 +42,7 @@ Whether that buys anything audible is the open question.
 | Generation path | latent GMM prior → decoder → vocoder | noise → denoiser × steps |
 | Control | calibrated descriptor basis over the latent space | descriptor vector conditioning the denoiser |
 | Cost per hit | one decode plus one vocoder pass | `--steps` denoiser passes, doubled under guidance |
-| Trained | yes | **no** |
+| Trained | yes | experimental hi-hat checkpoints; listening verdicts pending |
 
 ## The schedule
 
@@ -384,15 +387,19 @@ follows.
 | Adopt the reference package or write the network | Written here, no new dependency | The reference pins a Lightning/CUDA-era stack against this project's current torch, and its conditioning hooks would need wiring regardless. |
 | Conditioning mechanism | FiLM at every residual block | The issue's preferred option. Cross-attention on descriptor embeddings remains available and untried. |
 | Conditioning dropout and guidance | Shipped, on by default | Cannot be retrofitted without retraining. |
-| Descriptor loss on the predicted clean audio | Not implemented | The issue lists it as a "consider". It adds a weight to tune and a noise-level gate to choose, and it should be judged against a plain conditional baseline that does not yet exist. |
+| Descriptor loss on the predicted clean audio | Not implemented | The issue lists it as a "consider". It adds a weight to tune and a noise-level gate to choose; compare it against the trained plain conditional baseline before claiming a benefit. |
 | Sampler | Deterministic, no added noise | Two hits that share a texture seed stay comparable, which the control audits depend on. |
 
 ## What has not been done
 
-Of what the issue asks for after implementation:
+The detailed September 20 runs above establish only subset pilots. Later Modal
+job records and synchronized checkpoints are separate evidence; a directory
+name such as `modal-hihat-full-200` alone does not establish a completed or
+validated full-corpus result. Remaining evidence gaps for a quality decision:
 
-- No full-corpus run; the trained checkpoints saw 256 and 1,000 hi-hat hits.
-  No snare or kick run of any length.
+- No validated full-corpus comparison is reported here; the detailed trained
+  checkpoints above saw 256 and 1,000 hi-hat hits. This record does not establish
+  snare or kick quality for this engine.
 - No blind listening verdicts yet; the 1,000-hit pairs are prepared, unjudged.
 - No matched HF / attack / late-energy comparison against the VAE backend's
   rendered audio; the only cross-backend figures are `kicks eval` set scores.
@@ -402,11 +409,14 @@ Of what the issue asks for after implementation:
 - No axis, corner or random-combination sweep.
 - No rendering-latency benchmark beyond the M1 sampling times above (6.4 s per
   hit at 50 steps), so no claim about interactive use.
-- No CUDA figures. Real-epoch throughput on the M1 is ~0.32–0.38 s per hit.
+- The historical measurements here are from M1, at ~0.32–0.38 s per hit per
+  training epoch. Consult individual Modal run records for CUDA measurements.
 - Splits are fingerprinted the same way the VAE's are, with the same limitation:
   the fingerprint covers paths, sizes and mtimes, not content, so it does not
   detect near-duplicates or pack leakage. The issue asks for splits by
-  pack/family and near-duplicate checks; neither is implemented.
+  pack/family and near-duplicate checks. The newer `benchmark-freeze` tool
+  hashes bytes and groups sources/exact duplicates, but does not retroactively
+  change these historical training splits or solve near-duplicate detection.
 - The studio integration (below) has no latency benchmark beyond the one
   measurement recorded there, and its slider mapping has had no control audit.
 
@@ -416,16 +426,17 @@ the evidence above, not the code alone.
 
 ## Serving in the studio
 
-Added 2026-09-27. A checkpoint is served beside the VAE, never instead of it,
-and only when named:
+Added 2026-09-27. A checkpoint is available as a separate engine only when
+explicitly configured:
 
 ```bash
 uv run kicks serve -i hihat --diffusion hihat=models/experiments/modal-hihat-full-200/hihat/diffusion_best.pth
 ```
 
 - **Selection.** Requests carry `backend=diffusion`; `/instruments` lists each
-  instrument's `backends`, and the studio shows an Engine switch (VAE /
-  Diffusion) plus sampler-step presets (25/50/100/200; the API takes 10–200)
+  instrument's `backends`, and the Studio engine selector includes Diffusion
+  alongside configured VAE, Synth and neural/hybrid candidates. It exposes
+  sampler-step presets (25/50/100/200; the API takes 10–200)
   on instruments that have one. Pads remember the backend and steps.
 - **Sliders.** Each slider walks its descriptor's training distribution by
   quantile, from the label bank's 1st to its 99th percentile, with the median

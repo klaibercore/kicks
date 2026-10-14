@@ -1,5 +1,11 @@
 # Modal training runbook
 
+Scope reviewed: **14 October 2026**. This optional research wrapper launches
+the existing **waveform-diffusion trainer only**. It does not launch the seven
+`neural-train` families or isolated upstream adapters in the
+[neural model guide](neural-models.md). Local Studio and Analysis run without
+Modal; no cloud launch is needed for setup or documentation checks.
+
 `scripts/modal_train.py` is a standalone uv script pinned to Modal 1.5.5. It
 does not add Modal to the project environment. The training image is built with
 uv 0.11.7 from the project's frozen `uv.lock`; Kicks runs in `/.uv/.venv` with protobuf 3.19.6.
@@ -138,7 +144,12 @@ subset manifests; and writes `output/modal/local-corpus.json`.
    Sync updates `output/training` and the launched candidate model directory.
    Existing local `notes.json` and `notes.js` are never overwritten.
 
-## Experiment sequence after the smoke
+## Proposed experiment sequence after the smoke
+
+This sequence defines gates, not a report of completed jobs. Inspect the actual
+job records, synchronized checkpoints and dashboard evidence before deciding
+which step comes next. The historical September hi-hat measurements are in the
+[waveform diffusion notes](waveform-diffusion.md#first-runs).
 
 Do not schedule a long run until the smoke supplies actual L4 epoch timing and
 the synchronized checkpoint can generate samples. Keep the architecture,
